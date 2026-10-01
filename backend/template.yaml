@@ -1,8 +1,9 @@
 AWSTemplateFormatVersion: "2010-09-09"
 Transform: AWS::Serverless-2016-10-31
 Description: >
-  picture-ware backend - HTTP API + Go Lambdas that store photos in S3 and
-  their location metadata in DynamoDB, with a budget-driven kill switch.
+  picture-ware backend - Cognito-authenticated HTTP API + Go Lambdas that
+  store each user's photos in S3 and their location metadata in DynamoDB,
+  with a budget-driven kill switch.
   Deploy as stack "picture-ware": IAM roles must be named picture-ware-*.
 
 Parameters:
@@ -21,6 +22,11 @@ Parameters:
     Default: 5
     MinValue: 1
     Description: Monthly actual account cost (USD) above which the kill switch disables the API.
+  AuthDomainPrefix:
+    Type: String
+    Default: picture-ware-agodura
+    AllowedPattern: "^[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?$"
+    Description: Cognito hosted UI domain prefix (https://<prefix>.auth.<region>.amazoncognito.com).
 
 Globals:
   Function:
@@ -74,24 +80,128 @@ Resources:
               Bool:
                 aws:SecureTransport: "false"
 
-  PhotosTable:
+  # Owner-scoped: partition = Cognito sub, sort = photo id.
+  PhotosByUserTable:
     Type: AWS::DynamoDB::Table
     DeletionPolicy: Delete
     UpdateReplacePolicy: Delete
     Properties:
       BillingMode: PAY_PER_REQUEST
       AttributeDefinitions:
+        - AttributeName: userId
+          AttributeType: S
         - AttributeName: id
           AttributeType: S
       KeySchema:
-        - AttributeName: id
+        - AttributeName: userId
           KeyType: HASH
+        - AttributeName: id
+          KeyType: RANGE
+
+  # ---------- Auth ----------
+  UserPool:
+    Type: AWS::Cognito::UserPool
+    Properties:
+      UserPoolName: picture-ware-users
+      UsernameAttributes: [email]
+      AutoVerifiedAttributes: [email]
+      UsernameConfiguration:
+        CaseSensitive: false
+      Schema:
+        - Name: email
+          AttributeDataType: String
+          Required: true
+          Mutable: true
+      AdminCreateUserConfig:
+        AllowAdminCreateUserOnly: false
+      VerificationMessageTemplate:
+        DefaultEmailOption: CONFIRM_WITH_CODE
+      EmailConfiguration:
+        EmailSendingAccount: COGNITO_DEFAULT
+      AccountRecoverySetting:
+        RecoveryMechanisms:
+          - Name: verified_email
+            Priority: 1
+      MfaConfiguration: "OFF"
+      Policies:
+        PasswordPolicy:
+          MinimumLength: 8
+          RequireLowercase: false
+          RequireUppercase: false
+          RequireNumbers: false
+          RequireSymbols: false
+          TemporaryPasswordValidityDays: 7
+      UserPoolTags:
+        app: picture-ware
+
+  UserPoolDomain:
+    Type: AWS::Cognito::UserPoolDomain
+    Properties:
+      Domain: !Ref AuthDomainPrefix
+      UserPoolId: !Ref UserPool
+      ManagedLoginVersion: 1
+
+  # Public client used by the iOS app: authorization code + PKCE via the
+  # hosted UI. Cognito has no "require PKCE" switch; public clients without a
+  # secret are expected to always send code_challenge.
+  UserPoolClient:
+    Type: AWS::Cognito::UserPoolClient
+    Properties:
+      ClientName: picture-ware-ios
+      UserPoolId: !Ref UserPool
+      GenerateSecret: false
+      AllowedOAuthFlowsUserPoolClient: true
+      AllowedOAuthFlows: [code]
+      AllowedOAuthScopes: [openid, email, profile]
+      CallbackURLs: ["picture-ware://auth/callback"]
+      LogoutURLs: ["picture-ware://auth/signout"]
+      SupportedIdentityProviders: [COGNITO]
+      ExplicitAuthFlows: [ALLOW_REFRESH_TOKEN_AUTH]
+      AccessTokenValidity: 1
+      IdTokenValidity: 1
+      RefreshTokenValidity: 30
+      TokenValidityUnits:
+        AccessToken: hours
+        IdToken: hours
+        RefreshToken: days
+      EnableTokenRevocation: true
+      PreventUserExistenceErrors: ENABLED
+
+  # Test-only client for scripts/smoke.sh: admin (IAM-authenticated) password
+  # auth, no OAuth, no hosted UI. Not for app use.
+  SmokeTestClient:
+    Type: AWS::Cognito::UserPoolClient
+    Properties:
+      ClientName: picture-ware-smoke-test
+      UserPoolId: !Ref UserPool
+      GenerateSecret: false
+      ExplicitAuthFlows: [ALLOW_ADMIN_USER_PASSWORD_AUTH, ALLOW_REFRESH_TOKEN_AUTH]
+      AccessTokenValidity: 1
+      IdTokenValidity: 1
+      RefreshTokenValidity: 1
+      TokenValidityUnits:
+        AccessToken: hours
+        IdToken: hours
+        RefreshToken: days
+      EnableTokenRevocation: true
+      PreventUserExistenceErrors: ENABLED
 
   # ---------- API ----------
   HttpApi:
     Type: AWS::Serverless::HttpApi
     Properties:
-      # TODO: no auth in v1 - see API.md.
+      # Every route requires a Cognito access token (Authorization: Bearer).
+      # HTTP API matches an access token's client_id claim against audience.
+      Auth:
+        DefaultAuthorizer: CognitoJwt
+        Authorizers:
+          CognitoJwt:
+            IdentitySource: $request.header.Authorization
+            JwtConfiguration:
+              issuer: !Sub https://cognito-idp.${AWS::Region}.amazonaws.com/${UserPool}
+              audience:
+                - !Ref UserPoolClient
+                - !Ref SmokeTestClient
       DefaultRouteSettings:
         ThrottlingRateLimit: !Ref ThrottleRateLimit
         ThrottlingBurstLimit: !Ref ThrottleBurstLimit
@@ -105,14 +215,14 @@ Resources:
       Description: picture-ware POST/GET /photos
       Environment:
         Variables:
-          TABLE_NAME: !Ref PhotosTable
+          TABLE_NAME: !Ref PhotosByUserTable
           BUCKET_NAME: !Ref PhotosBucket
       Policies:
         - Version: "2012-10-17"
           Statement:
             - Effect: Allow
-              Action: [dynamodb:PutItem, dynamodb:Scan]
-              Resource: !GetAtt PhotosTable.Arn
+              Action: [dynamodb:PutItem, dynamodb:Query]
+              Resource: !GetAtt PhotosByUserTable.Arn
             - Effect: Allow
               # PutObject backs the presigned POST, GetObject the presigned GET.
               Action: [s3:PutObject, s3:GetObject]
@@ -146,13 +256,13 @@ Resources:
       Description: picture-ware marks photos ready on S3 ObjectCreated
       Environment:
         Variables:
-          TABLE_NAME: !Ref PhotosTable
+          TABLE_NAME: !Ref PhotosByUserTable
       Policies:
         - Version: "2012-10-17"
           Statement:
             - Effect: Allow
               Action: dynamodb:UpdateItem
-              Resource: !GetAtt PhotosTable.Arn
+              Resource: !GetAtt PhotosByUserTable.Arn
       Events:
         PhotoUploaded:
           Type: S3
@@ -261,8 +371,20 @@ Outputs:
     Description: Photo bucket
     Value: !Ref PhotosBucket
   TableName:
-    Description: Photo metadata table
-    Value: !Ref PhotosTable
+    Description: Photo metadata table (pk userId, sk id)
+    Value: !Ref PhotosByUserTable
+  UserPoolId:
+    Description: Cognito user pool id (JWT issuer is https://cognito-idp.<region>.amazonaws.com/<UserPoolId>)
+    Value: !Ref UserPool
+  UserPoolClientId:
+    Description: Public app client id for the iOS app (code + PKCE)
+    Value: !Ref UserPoolClient
+  SmokeTestClientId:
+    Description: Test-only client used by scripts/smoke.sh (admin password auth)
+    Value: !Ref SmokeTestClient
+  AuthDomain:
+    Description: Cognito hosted UI base URL
+    Value: !Sub https://${UserPoolDomain}.auth.${AWS::Region}.amazoncognito.com
   ApiId:
     Description: HTTP API id (used by killswitch-reset.sh)
     Value: !Ref HttpApi

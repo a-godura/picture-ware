@@ -6,18 +6,94 @@ Base URL: the `ApiUrl` output of the `picture-ware` CloudFormation stack
 All responses are JSON (`Content-Type: application/json`). Errors are
 `{"error": "<message>"}` with a 4xx/5xx status.
 
-> **TODO (auth):** v1 has **no authentication**. Anyone with the URL can create
-> upload slots and list every photo. Add auth (e.g. Cognito / Sign in with Apple
-> JWT authorizer on the HTTP API) before real use.
+## Authentication
+
+Every route requires a **Cognito access token**:
+
+```
+Authorization: Bearer <access_token>
+```
+
+Photos are private to the signed-in user: `POST /photos` creates a photo owned
+by the caller, and `GET /photos` returns only the caller's photos. The user id
+is the token's `sub` claim.
+
+### Cognito setup (stack outputs)
+
+| output             | example                                                        |
+|--------------------|----------------------------------------------------------------|
+| `UserPoolId`       | `us-east-2_XXXXXXXXX`                                          |
+| `UserPoolClientId` | public app client id (no secret)                               |
+| `AuthDomain`       | `https://picture-ware-agodura.auth.us-east-2.amazoncognito.com` |
+| `ApiUrl`           | API base URL                                                   |
+
+- Sign-in identifier is the user's **email** (username = email). Self sign-up
+  is on; new users confirm their email with a code Cognito emails them.
+  Passwords: at least 8 characters, no other complexity rules.
+- Hosted UI (classic managed login) at `AuthDomain`.
+- App client: **authorization code grant with PKCE** only, no client secret,
+  scopes `openid email profile`, identity provider `COGNITO`.
+  - Callback URL: `picture-ware://auth/callback`
+  - Sign-out URL: `picture-ware://auth/signout`
+- Token lifetimes: access and ID tokens **1 hour**, refresh token **30 days**.
+  Refresh-token revocation is enabled (`/oauth2/revoke`); user-existence
+  errors are suppressed.
+
+### Getting a token (iOS)
+
+1. Generate a PKCE `code_verifier` and its S256 `code_challenge`.
+2. Open (e.g. `ASWebAuthenticationSession`, callback scheme `picture-ware`):
+   ```
+   {AuthDomain}/oauth2/authorize?response_type=code&client_id={UserPoolClientId}
+     &redirect_uri=picture-ware://auth/callback&scope=openid+email+profile
+     &code_challenge={challenge}&code_challenge_method=S256&state={state}
+   ```
+   The hosted UI handles sign-in, sign-up and email verification.
+3. On `picture-ware://auth/callback?code=…&state=…`, exchange the code:
+   ```
+   POST {AuthDomain}/oauth2/token
+   Content-Type: application/x-www-form-urlencoded
+
+   grant_type=authorization_code&client_id={UserPoolClientId}
+   &code={code}&redirect_uri=picture-ware://auth/callback&code_verifier={verifier}
+   ```
+   → `{access_token, id_token, refresh_token, expires_in, token_type}`.
+4. Send `access_token` as the bearer token. **Do not send the ID token** — it
+   is rejected with 401.
+5. Refresh before/after expiry:
+   `grant_type=refresh_token&client_id={UserPoolClientId}&refresh_token={rt}`
+   to the same token endpoint.
+6. Sign out: `POST {AuthDomain}/oauth2/revoke` with
+   `token={refresh_token}&client_id={UserPoolClientId}`, then open
+   `{AuthDomain}/logout?client_id={UserPoolClientId}&logout_uri=picture-ware://auth/signout`
+   to clear the hosted-UI session cookie.
+
+OIDC discovery:
+`https://cognito-idp.us-east-2.amazonaws.com/{UserPoolId}/.well-known/openid-configuration`.
+
+### Auth errors
+
+| status | body                          | when                                                        |
+|--------|-------------------------------|-------------------------------------------------------------|
+| 401    | `{"message":"Unauthorized"}`  | missing, malformed, expired or wrong-issuer/audience token (API Gateway) |
+| 401    | `{"error":"unauthorized"}`    | valid JWT that is not an access token (e.g. an ID token)    |
+
+On 401, refresh the access token once and retry; if refresh fails, sign in again.
+
+The stack also has a test-only `SmokeTestClient` (admin password auth, no
+OAuth) used by `scripts/smoke.sh` through IAM-authenticated admin APIs; apps
+must not use it.
 
 ## Flow
 
-1. iOS reads the GPS location (and capture time) from the photo's own metadata
+1. iOS signs the user in (above) and reads the GPS location (and capture time) from the photo's own metadata
    on device. HEIC is common, so the server does no EXIF parsing in v1.
-2. `POST /photos` with the location → get an `id` and a presigned S3 POST.
+2. `POST /photos` (with the bearer token) with the location → get an `id`
+   and a presigned S3 POST.
 3. Upload the image bytes directly to S3 with that presigned POST.
 4. S3 `ObjectCreated` triggers the processor Lambda, which marks the photo `ready`.
-5. `GET /photos` returns ready photos with a short-lived `imageUrl` to show on the map.
+5. `GET /photos` returns the caller's ready photos with a short-lived
+   `imageUrl` to show on the map.
 
 ## `POST /photos`
 
@@ -49,7 +125,7 @@ Body limit 4 KiB.
   "upload": {
     "url": "https://<bucket>.s3.us-east-2.amazonaws.com",
     "fields": {
-      "key": "photos/6f1c0e8e-5d0b-4b8a-9f1e-2a3b4c5d6e7f",
+      "key": "photos/<userId>/6f1c0e8e-5d0b-4b8a-9f1e-2a3b4c5d6e7f",
       "Content-Type": "image/jpeg",
       "policy": "…",
       "X-Amz-Algorithm": "AWS4-HMAC-SHA256",
@@ -77,7 +153,7 @@ curl -F key=… -F Content-Type=image/jpeg -F policy=… … -F file=@photo.jpg 
 
 The presigned policy enforces:
 
-- exact key `photos/<id>`
+- exact key `photos/<userId>/<id>` (`userId` = the caller's `sub`)
 - exact `Content-Type` (the one sent to `POST /photos`)
 - size 1 byte … 15 MiB (15,728,640 bytes)
 - expires 10 minutes after creation
@@ -91,6 +167,7 @@ oversized files (S3 may also just reset the connection).
 | status | when                                             |
 |--------|--------------------------------------------------|
 | 400    | malformed JSON, unknown field, validation failure |
+| 401    | missing/invalid token (see Authentication)       |
 | 413    | body > 4 KiB                                     |
 | 429    | throttled (see below)                            |
 | 500    | internal error                                   |
@@ -114,12 +191,14 @@ oversized files (S3 may also just reset the connection).
 }
 ```
 
-- Only photos with status `ready` are returned. `photos` is always an array.
+- Only the caller's photos with status `ready` are returned. `photos` is
+  always an array.
 - `takenAt` is `null` when it was not supplied.
 - `imageUrl` is a presigned GET valid for **1 hour** (it is signed with the
   Lambda's temporary credentials, so in rare cases it can expire sooner if
   those credentials rotate). Re-fetch the list rather than caching URLs.
-- No pagination in v1 (the table is scanned).
+- No pagination in v1 (one DynamoDB Query on the caller's `userId` partition).
+- Errors: `401` (see Authentication), `429`, `500`.
 
 ## Limits and cost guardrails
 
