@@ -54,3 +54,23 @@ func TestCreateRequestValidate(t *testing.T) {
 		})
 	}
 }
+
+func TestObjectKeyRoundTrip(t *testing.T) {
+	const user, id = "8f0b2c1e-1111-4a5b-9c3d-abcdef012345", "6f1c0e8e-5d0b-4b8a-9f1e-2a3b4c5d6e7f"
+	key := ObjectKey(user, id)
+	if key != "photos/"+user+"/"+id {
+		t.Fatalf("key = %q", key)
+	}
+	u, i, ok := ParseObjectKey(key)
+	if !ok || u != user || i != id {
+		t.Fatalf("ParseObjectKey(%q) = %q, %q, %v", key, u, i, ok)
+	}
+}
+
+func TestParseObjectKeyRejects(t *testing.T) {
+	for _, key := range []string{"", "photos/", "photos/id", "photos/u/", "photos//id", "photos/u/a/b", "other/u/id", "photos/../id", "photos/u u/id"} {
+		if u, i, ok := ParseObjectKey(key); ok {
+			t.Errorf("ParseObjectKey(%q) = %q, %q, true", key, u, i)
+		}
+	}
+}

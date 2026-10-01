@@ -23,14 +23,14 @@ func newTestPresigner() *S3Presigner {
 }
 
 func TestPresignUploadPolicy(t *testing.T) {
-	up, err := newTestPresigner().PresignUpload(context.Background(), "photos/abc", "image/heic")
+	up, err := newTestPresigner().PresignUpload(context.Background(), "photos/user-1/abc", "image/heic")
 	if err != nil {
 		t.Fatal(err)
 	}
 	if !strings.Contains(up.URL, "test-bucket") {
 		t.Fatalf("url %q does not reference bucket", up.URL)
 	}
-	if up.Fields["key"] != "photos/abc" || up.Fields["Content-Type"] != "image/heic" {
+	if up.Fields["key"] != "photos/user-1/abc" || up.Fields["Content-Type"] != "image/heic" {
 		t.Fatalf("fields = %v", up.Fields)
 	}
 	raw, err := base64.StdEncoding.DecodeString(up.Fields["policy"])
@@ -55,7 +55,7 @@ func TestPresignUploadPolicy(t *testing.T) {
 		case map[string]any:
 			if k, ok := c["key"]; ok {
 				keyConds++
-				haveKey = k == "photos/abc"
+				haveKey = k == "photos/user-1/abc"
 			}
 			if c["Content-Type"] == "image/heic" {
 				haveType = true
@@ -72,11 +72,11 @@ func TestPresignUploadPolicy(t *testing.T) {
 }
 
 func TestPresignGet(t *testing.T) {
-	u, err := newTestPresigner().PresignGet(context.Background(), "photos/abc")
+	u, err := newTestPresigner().PresignGet(context.Background(), "photos/user-1/abc")
 	if err != nil {
 		t.Fatal(err)
 	}
-	if !strings.Contains(u, "photos/abc") || !strings.Contains(u, "X-Amz-Expires=3600") {
+	if !strings.Contains(u, "photos/user-1/abc") || !strings.Contains(u, "X-Amz-Expires=3600") {
 		t.Fatalf("unexpected url %q", u)
 	}
 }

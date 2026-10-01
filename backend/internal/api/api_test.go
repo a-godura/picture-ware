@@ -16,10 +16,11 @@ import (
 )
 
 type fakeStore struct {
-	put     []photos.Photo
-	ready   []photos.Photo
-	putErr  error
-	listErr error
+	put      []photos.Photo
+	ready    []photos.Photo // returned only for listUser == testUser
+	putErr   error
+	listErr  error
+	listUser string
 }
 
 func (f *fakeStore) Put(_ context.Context, p photos.Photo) error {
@@ -30,7 +31,13 @@ func (f *fakeStore) Put(_ context.Context, p photos.Photo) error {
 	return nil
 }
 
-func (f *fakeStore) ListReady(context.Context) ([]photos.Photo, error) { return f.ready, f.listErr }
+func (f *fakeStore) ListReady(_ context.Context, userID string) ([]photos.Photo, error) {
+	f.listUser = userID
+	if userID != testUser {
+		return nil, f.listErr
+	}
+	return f.ready, f.listErr
+}
 
 type fakePresigner struct {
 	uploadErr error
@@ -51,6 +58,20 @@ func (f *fakePresigner) PresignGet(_ context.Context, key string) (string, error
 }
 
 var fixedNow = time.Date(2026, 10, 1, 12, 0, 0, 0, time.UTC)
+
+const testUser = "8f0b2c1e-1111-4a5b-9c3d-abcdef012345"
+
+// authed returns a request as API Gateway's JWT authorizer would pass it for
+// an access token belonging to sub.
+func authed(routeKey, sub string) events.APIGatewayV2HTTPRequest {
+	req := events.APIGatewayV2HTTPRequest{RouteKey: routeKey}
+	req.RequestContext.Authorizer = &events.APIGatewayV2HTTPRequestContextAuthorizerDescription{
+		JWT: &events.APIGatewayV2HTTPRequestContextAuthorizerJWTDescription{
+			Claims: map[string]string{"sub": sub, "token_use": "access", "client_id": "client"},
+		},
+	}
+	return req
+}
 
 func newHandler(s *fakeStore, p *fakePresigner) *Handler {
 	return &Handler{Store: s, Presigner: p, NewID: func() string { return "id-1" }, Now: func() time.Time { return fixedNow }}
@@ -99,9 +120,9 @@ func TestCreate(t *testing.T) {
 			if tt.b64 {
 				body = base64.StdEncoding.EncodeToString([]byte(body))
 			}
-			resp, err := newHandler(s, p).Handle(context.Background(), events.APIGatewayV2HTTPRequest{
-				RouteKey: "POST /photos", Body: body, IsBase64Encoded: tt.b64,
-			})
+			req := authed("POST /photos", testUser)
+			req.Body, req.IsBase64Encoded = body, tt.b64
+			resp, err := newHandler(s, p).Handle(context.Background(), req)
 			if err != nil {
 				t.Fatal(err)
 			}
@@ -124,14 +145,14 @@ func TestCreate(t *testing.T) {
 			if err := json.Unmarshal([]byte(resp.Body), &got); err != nil {
 				t.Fatal(err)
 			}
-			if got.ID != "id-1" || got.Upload.URL == "" || got.Upload.Fields["key"] != "photos/id-1" {
+			if got.ID != "id-1" || got.Upload.URL == "" || got.Upload.Fields["key"] != "photos/"+testUser+"/id-1" {
 				t.Fatalf("unexpected response %+v", got)
 			}
 			if len(s.put) != 1 {
 				t.Fatalf("want 1 stored item, got %d", len(s.put))
 			}
 			stored := s.put[0]
-			if stored.Status != photos.StatusPending || !stored.CreatedAt.Equal(fixedNow) || stored.ContentType != p.gotType {
+			if stored.UserID != testUser || stored.ID != "id-1" || stored.Status != photos.StatusPending || !stored.CreatedAt.Equal(fixedNow) || stored.ContentType != p.gotType {
 				t.Fatalf("unexpected stored item %+v", stored)
 			}
 		})
@@ -162,9 +183,12 @@ func TestList(t *testing.T) {
 			if p == nil {
 				p = &fakePresigner{}
 			}
-			resp, err := newHandler(tt.store, p).Handle(context.Background(), events.APIGatewayV2HTTPRequest{RouteKey: "GET /photos"})
+			resp, err := newHandler(tt.store, p).Handle(context.Background(), authed("GET /photos", testUser))
 			if err != nil {
 				t.Fatal(err)
+			}
+			if tt.store.listUser != testUser {
+				t.Fatalf("listed user %q, want %q", tt.store.listUser, testUser)
 			}
 			if resp.StatusCode != tt.wantStatus {
 				t.Fatalf("status = %d, want %d", resp.StatusCode, tt.wantStatus)
@@ -186,7 +210,7 @@ func TestList(t *testing.T) {
 				t.Fatalf("got %d photos, want %d", len(got.Photos), len(tt.wantIDs))
 			}
 			for i, ph := range got.Photos {
-				if ph.ID != tt.wantIDs[i] || ph.ImageURL != "https://get.example/photos/"+ph.ID {
+				if ph.ID != tt.wantIDs[i] || ph.ImageURL != "https://get.example/photos/"+testUser+"/"+ph.ID {
 					t.Fatalf("photo %d = %+v", i, ph)
 				}
 			}
@@ -194,8 +218,77 @@ func TestList(t *testing.T) {
 	}
 }
 
+func TestListIsOwnerScoped(t *testing.T) {
+	s := &fakeStore{ready: []photos.Photo{{ID: "a", Status: photos.StatusReady}}}
+	resp, _ := newHandler(s, &fakePresigner{}).Handle(context.Background(), authed("GET /photos", "someone-else"))
+	if resp.StatusCode != http.StatusOK || s.listUser != "someone-else" {
+		t.Fatalf("status %d, listed user %q", resp.StatusCode, s.listUser)
+	}
+	var got ListResponse
+	if err := json.Unmarshal([]byte(resp.Body), &got); err != nil || len(got.Photos) != 0 {
+		t.Fatalf("other user saw photos: %s", resp.Body)
+	}
+}
+
+func TestUserID(t *testing.T) {
+	withClaims := func(c map[string]string) events.APIGatewayV2HTTPRequest {
+		req := events.APIGatewayV2HTTPRequest{}
+		req.RequestContext.Authorizer = &events.APIGatewayV2HTTPRequestContextAuthorizerDescription{
+			JWT: &events.APIGatewayV2HTTPRequestContextAuthorizerJWTDescription{Claims: c},
+		}
+		return req
+	}
+	noJWT := events.APIGatewayV2HTTPRequest{}
+	noJWT.RequestContext.Authorizer = &events.APIGatewayV2HTTPRequestContextAuthorizerDescription{}
+	tests := []struct {
+		name   string
+		req    events.APIGatewayV2HTTPRequest
+		want   string
+		wantOK bool
+	}{
+		{name: "access token", req: withClaims(map[string]string{"sub": testUser, "token_use": "access"}), want: testUser, wantOK: true},
+		{name: "no authorizer", req: events.APIGatewayV2HTTPRequest{}},
+		{name: "no jwt", req: noJWT},
+		{name: "nil claims", req: withClaims(nil)},
+		{name: "missing sub", req: withClaims(map[string]string{"token_use": "access"})},
+		{name: "empty sub", req: withClaims(map[string]string{"sub": "", "token_use": "access"})},
+		{name: "id token rejected", req: withClaims(map[string]string{"sub": testUser, "token_use": "id"})},
+		{name: "missing token_use", req: withClaims(map[string]string{"sub": testUser})},
+		{name: "sub with slash", req: withClaims(map[string]string{"sub": "a/b", "token_use": "access"})},
+		{name: "sub with dots", req: withClaims(map[string]string{"sub": "..", "token_use": "access"})},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got, ok := UserID(tt.req)
+			if got != tt.want || ok != tt.wantOK {
+				t.Fatalf("UserID = %q, %v; want %q, %v", got, ok, tt.want, tt.wantOK)
+			}
+		})
+	}
+}
+
+func TestMissingClaimsUnauthorized(t *testing.T) {
+	for _, route := range []string{"POST /photos", "GET /photos"} {
+		t.Run(route, func(t *testing.T) {
+			s := &fakeStore{}
+			req := events.APIGatewayV2HTTPRequest{RouteKey: route, Body: `{"lat":1,"lng":1,"contentType":"image/jpeg"}`}
+			resp, err := newHandler(s, &fakePresigner{}).Handle(context.Background(), req)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if resp.StatusCode != http.StatusUnauthorized {
+				t.Fatalf("status = %d, want 401", resp.StatusCode)
+			}
+			errMsg(t, resp.Body)
+			if len(s.put) != 0 || s.listUser != "" {
+				t.Fatal("store touched without a user")
+			}
+		})
+	}
+}
+
 func TestUnknownRoute(t *testing.T) {
-	resp, _ := newHandler(&fakeStore{}, &fakePresigner{}).Handle(context.Background(), events.APIGatewayV2HTTPRequest{RouteKey: "DELETE /photos"})
+	resp, _ := newHandler(&fakeStore{}, &fakePresigner{}).Handle(context.Background(), authed("DELETE /photos", testUser))
 	if resp.StatusCode != http.StatusNotFound {
 		t.Fatalf("status = %d", resp.StatusCode)
 	}

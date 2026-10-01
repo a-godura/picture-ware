@@ -17,7 +17,8 @@ import (
 // ErrNotFound is returned when a photo record does not exist.
 var ErrNotFound = errors.New("photo not found")
 
-// DynamoStore persists photo metadata in a DynamoDB table keyed by "id".
+// DynamoStore persists photo metadata in a DynamoDB table with partition key
+// "userId" and sort key "id".
 type DynamoStore struct {
 	Client *dynamodb.Client
 	Table  string
@@ -32,7 +33,7 @@ func (s *DynamoStore) Put(ctx context.Context, p Photo) error {
 	_, err = s.Client.PutItem(ctx, &dynamodb.PutItemInput{
 		TableName:           &s.Table,
 		Item:                item,
-		ConditionExpression: aws.String("attribute_not_exists(id)"),
+		ConditionExpression: aws.String("attribute_not_exists(userId)"),
 	})
 	if err != nil {
 		return fmt.Errorf("put photo: %w", err)
@@ -40,21 +41,25 @@ func (s *DynamoStore) Put(ctx context.Context, p Photo) error {
 	return nil
 }
 
-// ListReady returns every photo whose status is "ready". It uses a Scan,
-// which is fine at v1 scale.
-func (s *DynamoStore) ListReady(ctx context.Context) ([]Photo, error) {
-	in := &dynamodb.ScanInput{
-		TableName:                 &s.Table,
-		FilterExpression:          aws.String("#s = :ready"),
-		ExpressionAttributeNames:  map[string]string{"#s": "status"},
-		ExpressionAttributeValues: map[string]types.AttributeValue{":ready": &types.AttributeValueMemberS{Value: StatusReady}},
+// ListReady returns the user's photos whose status is "ready" (a Query on
+// the userId partition, filtered on status).
+func (s *DynamoStore) ListReady(ctx context.Context, userID string) ([]Photo, error) {
+	in := &dynamodb.QueryInput{
+		TableName:                &s.Table,
+		KeyConditionExpression:   aws.String("#u = :u"),
+		FilterExpression:         aws.String("#s = :ready"),
+		ExpressionAttributeNames: map[string]string{"#u": "userId", "#s": "status"},
+		ExpressionAttributeValues: map[string]types.AttributeValue{
+			":u":     &types.AttributeValueMemberS{Value: userID},
+			":ready": &types.AttributeValueMemberS{Value: StatusReady},
+		},
 	}
 	var out []Photo
-	p := dynamodb.NewScanPaginator(s.Client, in)
+	p := dynamodb.NewQueryPaginator(s.Client, in)
 	for p.HasMorePages() {
 		page, err := p.NextPage(ctx)
 		if err != nil {
-			return nil, fmt.Errorf("scan photos: %w", err)
+			return nil, fmt.Errorf("query photos: %w", err)
 		}
 		var batch []Photo
 		if err := attributevalue.UnmarshalListOfMaps(page.Items, &batch); err != nil {
@@ -66,13 +71,16 @@ func (s *DynamoStore) ListReady(ctx context.Context) ([]Photo, error) {
 }
 
 // MarkReady flips an existing record to "ready" and records the object size.
-// It returns ErrNotFound if no record exists for id.
-func (s *DynamoStore) MarkReady(ctx context.Context, id string, size int64) error {
+// It returns ErrNotFound if no record exists for (userID, id).
+func (s *DynamoStore) MarkReady(ctx context.Context, userID, id string, size int64) error {
 	_, err := s.Client.UpdateItem(ctx, &dynamodb.UpdateItemInput{
-		TableName:                &s.Table,
-		Key:                      map[string]types.AttributeValue{"id": &types.AttributeValueMemberS{Value: id}},
+		TableName: &s.Table,
+		Key: map[string]types.AttributeValue{
+			"userId": &types.AttributeValueMemberS{Value: userID},
+			"id":     &types.AttributeValueMemberS{Value: id},
+		},
 		UpdateExpression:         aws.String("SET #s = :ready, #sz = :size"),
-		ConditionExpression:      aws.String("attribute_exists(id)"),
+		ConditionExpression:      aws.String("attribute_exists(userId)"),
 		ExpressionAttributeNames: map[string]string{"#s": "status", "#sz": "size"},
 		ExpressionAttributeValues: map[string]types.AttributeValue{
 			":ready": &types.AttributeValueMemberS{Value: StatusReady},

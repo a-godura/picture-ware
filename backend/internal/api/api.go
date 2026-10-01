@@ -18,7 +18,7 @@ import (
 // Store is the subset of photo persistence the API needs.
 type Store interface {
 	Put(ctx context.Context, p photos.Photo) error
-	ListReady(ctx context.Context) ([]photos.Photo, error)
+	ListReady(ctx context.Context, userID string) ([]photos.Photo, error)
 }
 
 // Presigner creates presigned S3 requests.
@@ -58,19 +58,47 @@ type ListResponse struct {
 
 const maxBodyBytes = 4 << 10
 
-// Handle routes an HTTP API (payload v2) request.
+// UserID returns the caller's Cognito user id (the "sub" claim) from the
+// HTTP API JWT authorizer context. It also requires token_use=access, so an
+// ID token (whose "aud" would also satisfy the authorizer) is rejected.
+// ok is false when the claims are missing or unusable.
+func UserID(req events.APIGatewayV2HTTPRequest) (string, bool) {
+	a := req.RequestContext.Authorizer
+	if a == nil || a.JWT == nil {
+		return "", false
+	}
+	claims := a.JWT.Claims
+	if claims["token_use"] != "access" {
+		return "", false
+	}
+	sub := claims["sub"]
+	if !photos.ValidUserID(sub) {
+		return "", false
+	}
+	return sub, true
+}
+
+// Handle routes an HTTP API (payload v2) request. API Gateway's JWT
+// authorizer rejects unauthenticated requests before they get here; a request
+// without usable claims is still answered 401 rather than trusted.
 func (h *Handler) Handle(ctx context.Context, req events.APIGatewayV2HTTPRequest) (events.APIGatewayV2HTTPResponse, error) {
 	switch req.RouteKey {
-	case "POST /photos":
-		return h.create(ctx, req), nil
-	case "GET /photos":
-		return h.list(ctx), nil
+	case "POST /photos", "GET /photos":
 	default:
 		return errorResponse(http.StatusNotFound, "not found"), nil
 	}
+	userID, ok := UserID(req)
+	if !ok {
+		slog.WarnContext(ctx, "request without usable JWT claims", "route", req.RouteKey)
+		return errorResponse(http.StatusUnauthorized, "unauthorized"), nil
+	}
+	if req.RouteKey == "POST /photos" {
+		return h.create(ctx, userID, req), nil
+	}
+	return h.list(ctx, userID), nil
 }
 
-func (h *Handler) create(ctx context.Context, req events.APIGatewayV2HTTPRequest) events.APIGatewayV2HTTPResponse {
+func (h *Handler) create(ctx context.Context, userID string, req events.APIGatewayV2HTTPRequest) events.APIGatewayV2HTTPResponse {
 	body := []byte(req.Body)
 	if req.IsBase64Encoded {
 		// HTTP API base64-encodes bodies it doesn't recognise as text.
@@ -94,6 +122,7 @@ func (h *Handler) create(ctx context.Context, req events.APIGatewayV2HTTPRequest
 	}
 
 	p := photos.Photo{
+		UserID:      userID,
 		ID:          h.NewID(),
 		Lat:         *in.Lat,
 		Lng:         *in.Lng,
@@ -106,7 +135,7 @@ func (h *Handler) create(ctx context.Context, req events.APIGatewayV2HTTPRequest
 		slog.ErrorContext(ctx, "store put failed", "err", err)
 		return errorResponse(http.StatusInternalServerError, "internal error")
 	}
-	up, err := h.Presigner.PresignUpload(ctx, photos.ObjectKey(p.ID), p.ContentType)
+	up, err := h.Presigner.PresignUpload(ctx, photos.ObjectKey(userID, p.ID), p.ContentType)
 	if err != nil {
 		slog.ErrorContext(ctx, "presign upload failed", "err", err)
 		return errorResponse(http.StatusInternalServerError, "internal error")
@@ -114,15 +143,15 @@ func (h *Handler) create(ctx context.Context, req events.APIGatewayV2HTTPRequest
 	return jsonResponse(http.StatusCreated, CreateResponse{ID: p.ID, Upload: up})
 }
 
-func (h *Handler) list(ctx context.Context) events.APIGatewayV2HTTPResponse {
-	items, err := h.Store.ListReady(ctx)
+func (h *Handler) list(ctx context.Context, userID string) events.APIGatewayV2HTTPResponse {
+	items, err := h.Store.ListReady(ctx, userID)
 	if err != nil {
 		slog.ErrorContext(ctx, "list failed", "err", err)
 		return errorResponse(http.StatusInternalServerError, "internal error")
 	}
 	out := ListResponse{Photos: make([]PhotoView, 0, len(items))}
 	for _, p := range items {
-		url, err := h.Presigner.PresignGet(ctx, photos.ObjectKey(p.ID))
+		url, err := h.Presigner.PresignGet(ctx, photos.ObjectKey(userID, p.ID))
 		if err != nil {
 			slog.ErrorContext(ctx, "presign get failed", "id", p.ID, "err", err)
 			return errorResponse(http.StatusInternalServerError, "internal error")

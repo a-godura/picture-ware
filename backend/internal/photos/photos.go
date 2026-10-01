@@ -5,6 +5,7 @@ package photos
 import (
 	"errors"
 	"fmt"
+	"strings"
 	"time"
 )
 
@@ -14,7 +15,8 @@ const (
 	StatusReady   = "ready"
 )
 
-// KeyPrefix is the S3 key prefix under which photo objects are stored.
+// KeyPrefix is the S3 key prefix under which photo objects are stored. Each
+// object lives at photos/<userId>/<id>.
 const KeyPrefix = "photos/"
 
 // MaxUploadBytes is the largest photo accepted by the presigned POST policy.
@@ -26,8 +28,9 @@ var AllowedContentTypes = map[string]bool{
 	"image/heic": true,
 }
 
-// Photo is the metadata record stored in DynamoDB.
+// Photo is the metadata record stored in DynamoDB, keyed by (userId, id).
 type Photo struct {
+	UserID      string     `dynamodbav:"userId"`
 	ID          string     `dynamodbav:"id"`
 	Lat         float64    `dynamodbav:"lat"`
 	Lng         float64    `dynamodbav:"lng"`
@@ -38,8 +41,36 @@ type Photo struct {
 	CreatedAt   time.Time  `dynamodbav:"createdAt"`
 }
 
-// ObjectKey returns the S3 key for a photo id.
-func ObjectKey(id string) string { return KeyPrefix + id }
+// ObjectKey returns the S3 key for a user's photo: photos/<userID>/<id>.
+func ObjectKey(userID, id string) string { return KeyPrefix + userID + "/" + id }
+
+// ParseObjectKey is the inverse of ObjectKey. It rejects keys outside
+// KeyPrefix and keys that are not exactly <userID>/<id> after it.
+func ParseObjectKey(key string) (userID, id string, ok bool) {
+	rest, ok := strings.CutPrefix(key, KeyPrefix)
+	if !ok {
+		return "", "", false
+	}
+	userID, id, ok = strings.Cut(rest, "/")
+	if !ok || !ValidUserID(userID) || id == "" || strings.Contains(id, "/") {
+		return "", "", false
+	}
+	return userID, id, true
+}
+
+// ValidUserID reports whether s is safe to use as a key segment. Cognito
+// "sub" values are UUIDs; this accepts a conservative superset.
+func ValidUserID(s string) bool {
+	if s == "" || len(s) > 128 {
+		return false
+	}
+	for _, c := range s {
+		if !(c >= 'a' && c <= 'z' || c >= 'A' && c <= 'Z' || c >= '0' && c <= '9' || c == '-' || c == '_') {
+			return false
+		}
+	}
+	return true
+}
 
 // CreateRequest is the body of POST /photos.
 type CreateRequest struct {
