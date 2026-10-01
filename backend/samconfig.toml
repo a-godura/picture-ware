@@ -20,3 +20,15 @@ fail_on_empty_changeset = false
 
 [default.delete.parameters]
 profile = "picture-ware"
+
+# CI (GitHub Actions): same as default, but credentials come from OIDC, not a local SSO profile.
+[ci.global.parameters]
+stack_name = "picture-ware"
+region = "us-east-2"
+
+[ci.deploy.parameters]
+resolve_s3 = true
+s3_prefix = "picture-ware"
+capabilities = "CAPABILITY_IAM CAPABILITY_NAMED_IAM"
+confirm_changeset = false
+fail_on_empty_changeset = false
