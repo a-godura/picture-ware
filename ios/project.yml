@@ -1,0 +1,83 @@
+# XcodeGen spec. The generated PictureWare.xcodeproj is committed, so you only
+# need xcodegen (`brew install xcodegen`) when changing this file:
+#   cd ios && xcodegen generate
+name: PictureWare
+options:
+  bundleIdPrefix: com.agodura
+  deploymentTarget:
+    iOS: "18.0"
+  createIntermediateGroups: true
+  developmentLanguage: en
+settings:
+  base:
+    SWIFT_VERSION: "6.0"
+    SWIFT_STRICT_CONCURRENCY: complete
+    MARKETING_VERSION: "1.0"
+    CURRENT_PROJECT_VERSION: "1"
+    DEVELOPMENT_TEAM: ""
+    ENABLE_USER_SCRIPT_SANDBOXING: YES
+targets:
+  PictureWare:
+    type: application
+    platform: iOS
+    sources:
+      - path: PictureWare
+    configFiles:
+      Debug: Config/Config.xcconfig
+      Release: Config/Config.xcconfig
+    info:
+      path: PictureWare/Resources/Info.plist
+      properties:
+        CFBundleDisplayName: Picture Ware
+        # Shown in the system "wants to use ... to Sign In" prompt.
+        CFBundleName: Picture Ware
+        CFBundleShortVersionString: $(MARKETING_VERSION)
+        CFBundleVersion: $(CURRENT_PROJECT_VERSION)
+        UILaunchScreen: {}
+        UISupportedInterfaceOrientations:
+          - UIInterfaceOrientationPortrait
+          - UIInterfaceOrientationLandscapeLeft
+          - UIInterfaceOrientationLandscapeRight
+        CFBundleURLTypes:
+          - CFBundleURLName: com.agodura.pictureware.auth
+            CFBundleURLSchemes:
+              - picture-ware
+        NSPhotoLibraryUsageDescription: >-
+          Picture Ware reads a photo's location from your library when the
+          photo file itself doesn't include it, so it can be placed on the map.
+        PWApiUrl: $(PW_API_URL)
+        PWAuthDomain: $(PW_AUTH_DOMAIN)
+        PWClientId: $(PW_CLIENT_ID)
+    settings:
+      base:
+        PRODUCT_BUNDLE_IDENTIFIER: com.agodura.pictureware
+        PRODUCT_NAME: PictureWare
+        TARGETED_DEVICE_FAMILY: "1"
+        ASSETCATALOG_COMPILER_APPICON_NAME: AppIcon
+        ASSETCATALOG_COMPILER_GLOBAL_ACCENT_COLOR_NAME: AccentColor
+        CODE_SIGN_STYLE: Automatic
+  PictureWareTests:
+    type: bundle.unit-test
+    platform: iOS
+    sources:
+      - path: PictureWareTests
+    dependencies:
+      - target: PictureWare
+    settings:
+      base:
+        PRODUCT_BUNDLE_IDENTIFIER: com.agodura.pictureware.tests
+        GENERATE_INFOPLIST_FILE: YES
+schemes:
+  PictureWare:
+    build:
+      targets:
+        PictureWare: all
+        PictureWareTests: [test]
+    run:
+      config: Debug
+    test:
+      config: Debug
+      targets:
+        - PictureWareTests
+    archive:
+      config: Release
