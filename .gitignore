@@ -1,0 +1,21 @@
+# macOS
+.DS_Store
+
+# Xcode
+xcuserdata/
+DerivedData/
+*.xcuserstate
+build/
+
+# Go
+/backend/bin/
+*.test
+*.out
+
+# AWS SAM
+.aws-sam/
+samconfig.local.toml
+
+# Env / secrets
+.env
+.env.*
