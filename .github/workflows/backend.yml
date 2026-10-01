@@ -1,0 +1,88 @@
+name: backend
+
+on:
+  pull_request:
+    paths:
+      - "backend/**"
+      - ".github/workflows/backend.yml"
+  push:
+    branches: [main]
+    paths:
+      - "backend/**"
+      - ".github/workflows/backend.yml"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: backend-${{ github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+defaults:
+  run:
+    working-directory: backend
+
+jobs:
+  test:
+    name: backend / test
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v7
+
+      - uses: actions/setup-go@v7
+        with:
+          go-version-file: backend/go.mod
+          cache-dependency-path: backend/go.sum
+
+      - uses: aws-actions/setup-sam@v3
+        with:
+          use-installer: true
+
+      - name: Vet and test
+        run: make test
+
+      - name: Lint template and build
+        run: make build
+
+  deploy:
+    name: backend / deploy
+    needs: test
+    if: github.ref == 'refs/heads/main' && github.event_name != 'pull_request'
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    permissions:
+      contents: read
+      id-token: write # lets the job request a GitHub OIDC token for AWS
+    concurrency:
+      group: backend-deploy
+      cancel-in-progress: false
+    steps:
+      - uses: actions/checkout@v7
+
+      - uses: actions/setup-go@v7
+        with:
+          go-version-file: backend/go.mod
+          cache-dependency-path: backend/go.sum
+
+      - uses: aws-actions/setup-sam@v3
+        with:
+          use-installer: true
+
+      - uses: aws-actions/configure-aws-credentials@v6
+        with:
+          role-to-assume: ${{ vars.AWS_DEPLOY_ROLE_ARN }}
+          aws-region: ${{ vars.AWS_REGION }}
+
+      - name: Build
+        run: make build
+
+      # The `ci` config env is the same as `default` minus the local SSO profile.
+      - name: Deploy
+        run: sam deploy --config-env ci
+
+      - name: Show API URL
+        run: |
+          aws cloudformation describe-stacks --stack-name picture-ware \
+            --query "Stacks[0].Outputs[?OutputKey=='ApiUrl'].OutputValue" --output text
