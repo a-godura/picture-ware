@@ -19,3 +19,6 @@ samconfig.local.toml
 # Env / secrets
 .env
 .env.*
+
+# Claude Code local worktrees
+.claude/worktrees/
