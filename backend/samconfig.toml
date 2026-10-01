@@ -1,0 +1,22 @@
+version = 0.1
+
+[default.global.parameters]
+stack_name = "picture-ware"
+region = "us-east-2"
+
+[default.build.parameters]
+parallel = true
+
+[default.validate.parameters]
+lint = true
+
+[default.deploy.parameters]
+profile = "picture-ware"
+resolve_s3 = true
+s3_prefix = "picture-ware"
+capabilities = "CAPABILITY_IAM CAPABILITY_NAMED_IAM"
+confirm_changeset = false
+fail_on_empty_changeset = false
+
+[default.delete.parameters]
+profile = "picture-ware"

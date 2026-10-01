@@ -1,0 +1,277 @@
+AWSTemplateFormatVersion: "2010-09-09"
+Transform: AWS::Serverless-2016-10-31
+Description: >
+  picture-ware backend - HTTP API + Go Lambdas that store photos in S3 and
+  their location metadata in DynamoDB, with a budget-driven kill switch.
+  Deploy as stack "picture-ware": IAM roles must be named picture-ware-*.
+
+Parameters:
+  ThrottleRateLimit:
+    Type: Number
+    Default: 5
+    MinValue: 0
+    Description: HTTP API default route steady-state requests per second.
+  ThrottleBurstLimit:
+    Type: Number
+    Default: 10
+    MinValue: 0
+    Description: HTTP API default route burst limit.
+  KillSwitchUSD:
+    Type: Number
+    Default: 5
+    MinValue: 1
+    Description: Monthly actual account cost (USD) above which the kill switch disables the API.
+
+Globals:
+  Function:
+    Runtime: provided.al2023
+    Architectures: [arm64]
+    Handler: bootstrap
+    MemorySize: 128
+    Timeout: 10
+    Tags:
+      app: picture-ware
+
+Resources:
+  # ---------- Storage ----------
+  PhotosBucket:
+    Type: AWS::S3::Bucket
+    Properties:
+      PublicAccessBlockConfiguration:
+        BlockPublicAcls: true
+        BlockPublicPolicy: true
+        IgnorePublicAcls: true
+        RestrictPublicBuckets: true
+      OwnershipControls:
+        Rules:
+          - ObjectOwnership: BucketOwnerEnforced
+      BucketEncryption:
+        ServerSideEncryptionConfiguration:
+          - ServerSideEncryptionByDefault:
+              SSEAlgorithm: AES256
+      LifecycleConfiguration:
+        Rules:
+          - Id: AbortIncompleteMultipartUploads
+            Status: Enabled
+            AbortIncompleteMultipartUpload:
+              DaysAfterInitiation: 1
+
+  PhotosBucketPolicy:
+    Type: AWS::S3::BucketPolicy
+    Properties:
+      Bucket: !Ref PhotosBucket
+      PolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Sid: DenyInsecureTransport
+            Effect: Deny
+            Principal: "*"
+            Action: "s3:*"
+            Resource:
+              - !GetAtt PhotosBucket.Arn
+              - !Sub "${PhotosBucket.Arn}/*"
+            Condition:
+              Bool:
+                aws:SecureTransport: "false"
+
+  PhotosTable:
+    Type: AWS::DynamoDB::Table
+    DeletionPolicy: Delete
+    UpdateReplacePolicy: Delete
+    Properties:
+      BillingMode: PAY_PER_REQUEST
+      AttributeDefinitions:
+        - AttributeName: id
+          AttributeType: S
+      KeySchema:
+        - AttributeName: id
+          KeyType: HASH
+
+  # ---------- API ----------
+  HttpApi:
+    Type: AWS::Serverless::HttpApi
+    Properties:
+      # TODO: no auth in v1 - see API.md.
+      DefaultRouteSettings:
+        ThrottlingRateLimit: !Ref ThrottleRateLimit
+        ThrottlingBurstLimit: !Ref ThrottleBurstLimit
+
+  ApiFunction:
+    Type: AWS::Serverless::Function
+    Metadata:
+      BuildMethod: go1.x
+    Properties:
+      CodeUri: cmd/api/
+      Description: picture-ware POST/GET /photos
+      Environment:
+        Variables:
+          TABLE_NAME: !Ref PhotosTable
+          BUCKET_NAME: !Ref PhotosBucket
+      Policies:
+        - Version: "2012-10-17"
+          Statement:
+            - Effect: Allow
+              Action: [dynamodb:PutItem, dynamodb:Scan]
+              Resource: !GetAtt PhotosTable.Arn
+            - Effect: Allow
+              # PutObject backs the presigned POST, GetObject the presigned GET.
+              Action: [s3:PutObject, s3:GetObject]
+              Resource: !Sub "${PhotosBucket.Arn}/photos/*"
+      Events:
+        CreatePhoto:
+          Type: HttpApi
+          Properties:
+            ApiId: !Ref HttpApi
+            Method: POST
+            Path: /photos
+        ListPhotos:
+          Type: HttpApi
+          Properties:
+            ApiId: !Ref HttpApi
+            Method: GET
+            Path: /photos
+
+  ApiFunctionLogGroup:
+    Type: AWS::Logs::LogGroup
+    Properties:
+      LogGroupName: !Sub /aws/lambda/${ApiFunction}
+      RetentionInDays: 14
+
+  ProcessorFunction:
+    Type: AWS::Serverless::Function
+    Metadata:
+      BuildMethod: go1.x
+    Properties:
+      CodeUri: cmd/processor/
+      Description: picture-ware marks photos ready on S3 ObjectCreated
+      Environment:
+        Variables:
+          TABLE_NAME: !Ref PhotosTable
+      Policies:
+        - Version: "2012-10-17"
+          Statement:
+            - Effect: Allow
+              Action: dynamodb:UpdateItem
+              Resource: !GetAtt PhotosTable.Arn
+      Events:
+        PhotoUploaded:
+          Type: S3
+          Properties:
+            Bucket: !Ref PhotosBucket
+            Events: s3:ObjectCreated:*
+            Filter:
+              S3Key:
+                Rules:
+                  - Name: prefix
+                    Value: photos/
+
+  ProcessorFunctionLogGroup:
+    Type: AWS::Logs::LogGroup
+    Properties:
+      LogGroupName: !Sub /aws/lambda/${ProcessorFunction}
+      RetentionInDays: 14
+
+  # ---------- Cost kill switch ----------
+  KillSwitchTopic:
+    Type: AWS::SNS::Topic
+    Properties:
+      DisplayName: picture-ware kill switch
+
+  KillSwitchTopicPolicy:
+    Type: AWS::SNS::TopicPolicy
+    Properties:
+      Topics: [!Ref KillSwitchTopic]
+      PolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Sid: AllowBudgetsPublish
+            Effect: Allow
+            Principal:
+              Service: budgets.amazonaws.com
+            Action: sns:Publish
+            Resource: !Ref KillSwitchTopic
+            Condition:
+              StringEquals:
+                aws:SourceAccount: !Ref AWS::AccountId
+              ArnLike:
+                aws:SourceArn: !Sub arn:${AWS::Partition}:budgets::${AWS::AccountId}:*
+
+  KillSwitchBudget:
+    Type: AWS::Budgets::Budget
+    DependsOn: KillSwitchTopicPolicy
+    Properties:
+      Budget:
+        BudgetName: picture-ware-killswitch
+        BudgetType: COST
+        TimeUnit: MONTHLY
+        BudgetLimit:
+          Amount: !Ref KillSwitchUSD
+          Unit: USD
+      NotificationsWithSubscribers:
+        - Notification:
+            NotificationType: ACTUAL
+            ComparisonOperator: GREATER_THAN
+            Threshold: 100
+            ThresholdType: PERCENTAGE
+          Subscribers:
+            - SubscriptionType: SNS
+              Address: !Ref KillSwitchTopic
+
+  KillSwitchFunction:
+    Type: AWS::Serverless::Function
+    Metadata:
+      BuildMethod: go1.x
+    Properties:
+      CodeUri: cmd/killswitch/
+      Description: picture-ware budget kill switch - throttles API to 0 and zeroes Lambda concurrency
+      Timeout: 30
+      Environment:
+        Variables:
+          API_ID: !Ref HttpApi
+          STAGE_NAME: $default
+          FUNCTION_NAMES: !Sub "${ApiFunction},${ProcessorFunction}"
+      Policies:
+        - Version: "2012-10-17"
+          Statement:
+            - Effect: Allow
+              Action: apigateway:PATCH
+              Resource: !Sub arn:${AWS::Partition}:apigateway:${AWS::Region}::/apis/${HttpApi}/stages/$default
+            - Effect: Allow
+              Action: lambda:PutFunctionConcurrency
+              Resource:
+                - !GetAtt ApiFunction.Arn
+                - !GetAtt ProcessorFunction.Arn
+      Events:
+        BudgetExceeded:
+          Type: SNS
+          Properties:
+            Topic: !Ref KillSwitchTopic
+
+  KillSwitchFunctionLogGroup:
+    Type: AWS::Logs::LogGroup
+    Properties:
+      LogGroupName: !Sub /aws/lambda/${KillSwitchFunction}
+      RetentionInDays: 14
+
+Outputs:
+  ApiUrl:
+    Description: Base URL of the HTTP API
+    Value: !Sub https://${HttpApi}.execute-api.${AWS::Region}.${AWS::URLSuffix}
+  BucketName:
+    Description: Photo bucket
+    Value: !Ref PhotosBucket
+  TableName:
+    Description: Photo metadata table
+    Value: !Ref PhotosTable
+  ApiId:
+    Description: HTTP API id (used by killswitch-reset.sh)
+    Value: !Ref HttpApi
+  ApiFunctionName:
+    Description: API Lambda name (used by killswitch-reset.sh)
+    Value: !Ref ApiFunction
+  ProcessorFunctionName:
+    Description: Processor Lambda name (used by killswitch-reset.sh)
+    Value: !Ref ProcessorFunction
+  KillSwitchTopicArn:
+    Description: SNS topic the budget notifies
+    Value: !Ref KillSwitchTopic
