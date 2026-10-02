@@ -101,6 +101,11 @@ struct NetworkTests {
         try await api.deletePhoto(id: "gone")
     }
 
+    @Test func deleteOnMissingRouteIsAnError() async throws {
+        StubURLProtocol.install { _ in (404, Data(#"{"message":"Not Found"}"#.utf8)) }
+        await #expect(throws: APIError.http(status: 404, message: "Not Found")) { try await api.deletePhoto(id: "p1") }
+    }
+
     @Test func deleteServerErrorIsSurfaced() async throws {
         StubURLProtocol.install { _ in (500, Data(#"{"error":"internal error"}"#.utf8)) }
         await #expect(throws: APIError.http(status: 500, message: "internal error")) { try await api.deletePhoto(id: "p1") }

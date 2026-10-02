@@ -38,11 +38,12 @@ struct APIClient: Sendable {
         return try APICoding.decoder().decode(CreatePhotoResponse.self, from: data)
     }
 
-    /// Deletes one of the user's photos. A 404 means it's already gone, which is what the caller wanted.
+    /// Deletes one of the user's photos. The backend's own 404 means it's already gone, which is what
+    /// the caller wanted; any other 404 (e.g. API Gateway's "Not Found" for a missing route) is an error.
     func deletePhoto(id: String) async throws {
         do {
             _ = try await send(request(path: "photos/\(id)", method: "DELETE"), expecting: 204)
-        } catch APIError.http(status: 404, _) {
+        } catch APIError.http(status: 404, message: "photo not found") {
         }
     }
 
