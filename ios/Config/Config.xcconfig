@@ -1,0 +1,14 @@
+// picture-ware app configuration. These values are NOT secrets.
+//
+// Fill them in from the backend stack outputs:
+//   PW_API_URL      <- ApiUrl      e.g. https://abc123.execute-api.us-east-2.amazonaws.com
+//   PW_AUTH_DOMAIN  <- AuthDomain  e.g. https://picture-ware.auth.us-east-2.amazoncognito.com
+//   PW_CLIENT_ID    <- ClientId    (Cognito app client id: public client, no secret)
+//
+// xcconfig treats `//` as the start of a comment, so write URLs as
+// `https:/$()/host` -- `$()` expands to nothing, giving `https://host`.
+// No trailing slash. The app refuses to sign in if a value is missing or contains REPLACE_ME.
+
+PW_API_URL = https:/$()/371v2nw03l.execute-api.us-east-2.amazonaws.com
+PW_AUTH_DOMAIN = https:/$()/picture-ware-agodura.auth.us-east-2.amazoncognito.com
+PW_CLIENT_ID = 5rrvgvs2pn73vkqedgo7tmfi2b
