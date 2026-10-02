@@ -2,9 +2,6 @@ name: ios
 
 on:
   pull_request:
-    paths:
-      - "ios/**"
-      - ".github/workflows/ios.yml"
   push:
     branches: [main]
     paths:
@@ -19,8 +16,39 @@ concurrency:
   cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
 jobs:
+  changes:
+    name: changes
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    defaults:
+      run:
+        working-directory: .
+    outputs:
+      run: ${{ steps.diff.outputs.run }}
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          fetch-depth: 0
+      # PRs always trigger this workflow so its check can be required on main;
+      # the real jobs are skipped (which counts as passing) when nothing relevant changed.
+      - id: diff
+        env:
+          EVENT: ${{ github.event_name }}
+          BASE: ${{ github.event.pull_request.base.sha }}
+          HEAD: ${{ github.event.pull_request.head.sha }}
+        run: |
+          if [ "$EVENT" != "pull_request" ]; then
+            echo "run=true" >> "$GITHUB_OUTPUT"
+          elif git diff --name-only "$BASE...$HEAD" | grep -qE '^(ios/|\.github/workflows/ios\.yml$)'; then
+            echo "run=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "run=false" >> "$GITHUB_OUTPUT"
+          fi
+
   test:
     name: ios / test
+    needs: changes
+    if: needs.changes.outputs.run == 'true'
     runs-on: macos-latest
     timeout-minutes: 30
     steps:
