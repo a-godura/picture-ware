@@ -189,4 +189,23 @@ upload "$IMG"
 object_exists "$SUB_A/$ID" && fail "B wrote into A's prefix"
 pass "B: upload with key rewritten to A's prefix -> 403"
 
+# 6. Delete: only the owner can delete; the file and the record both go.
+del() { STATUS="$(curl -sS -o "$TMP/resp.json" -w '%{http_code}' -X DELETE -H "@$1" "$API/photos/$2")"; }
+del /dev/null "$A_ID"
+[ "$STATUS" = 401 ] || fail "DELETE without token -> $STATUS"
+pass "DELETE /photos/{id} without token -> 401"
+del "$TMP/b.auth" "$A_ID"
+[ "$STATUS" = 404 ] || fail "B deleting A's photo -> $STATUS"
+object_exists "$SUB_A/$A_ID" || fail "B's delete removed A's object"
+pass "B: DELETE A's photo -> 404, A's object still there"
+del "$TMP/a.auth" "$A_ID"
+[ "$STATUS" = 204 ] || fail "A: DELETE -> $STATUS $(cat "$TMP/resp.json")"
+object_exists "$SUB_A/$A_ID" && fail "object still exists after delete"
+api GET "$TMP/a.auth"
+jq -e --arg id "$A_ID" 'all(.photos[]; .id != $id)' "$TMP/resp.json" >/dev/null || fail "deleted photo still listed"
+pass "A: DELETE /photos/$A_ID -> 204, object gone, not listed"
+del "$TMP/a.auth" "$A_ID"
+[ "$STATUS" = 404 ] || fail "repeat DELETE -> $STATUS"
+pass "A: repeat DELETE -> 404"
+
 echo "smoke test passed"

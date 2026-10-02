@@ -22,11 +22,14 @@ func main() {
 	if err != nil {
 		log.Fatalf("load aws config: %v", err)
 	}
+	s3Client := s3.NewFromConfig(cfg)
+	bucket := mustEnv("BUCKET_NAME")
 	h := &api.Handler{
-		Store: &photos.DynamoStore{Client: dynamodb.NewFromConfig(cfg), Table: mustEnv("TABLE_NAME")},
+		Store:   &photos.DynamoStore{Client: dynamodb.NewFromConfig(cfg), Table: mustEnv("TABLE_NAME")},
+		Objects: &photos.S3Objects{Client: s3Client, Bucket: bucket},
 		Presigner: &photos.S3Presigner{
-			Client:     s3.NewPresignClient(s3.NewFromConfig(cfg)),
-			Bucket:     mustEnv("BUCKET_NAME"),
+			Client:     s3.NewPresignClient(s3Client),
+			Bucket:     bucket,
 			PostExpiry: 10 * time.Minute,
 			GetExpiry:  time.Hour,
 		},

@@ -97,6 +97,42 @@ func (s *DynamoStore) MarkReady(ctx context.Context, userID, id string, size int
 	return nil
 }
 
+// Delete removes the record for (userID, id). It returns ErrNotFound if no
+// such record exists, so callers can't probe other users' ids.
+func (s *DynamoStore) Delete(ctx context.Context, userID, id string) error {
+	_, err := s.Client.DeleteItem(ctx, &dynamodb.DeleteItemInput{
+		TableName: &s.Table,
+		Key: map[string]types.AttributeValue{
+			"userId": &types.AttributeValueMemberS{Value: userID},
+			"id":     &types.AttributeValueMemberS{Value: id},
+		},
+		ConditionExpression: aws.String("attribute_exists(userId)"),
+	})
+	var ccf *types.ConditionalCheckFailedException
+	if errors.As(err, &ccf) {
+		return ErrNotFound
+	}
+	if err != nil {
+		return fmt.Errorf("delete photo: %w", err)
+	}
+	return nil
+}
+
+// S3Objects deletes photo objects. S3 deletes are idempotent: deleting a
+// missing key succeeds.
+type S3Objects struct {
+	Client *s3.Client
+	Bucket string
+}
+
+// Delete removes the object at key.
+func (o *S3Objects) Delete(ctx context.Context, key string) error {
+	if _, err := o.Client.DeleteObject(ctx, &s3.DeleteObjectInput{Bucket: &o.Bucket, Key: &key}); err != nil {
+		return fmt.Errorf("delete object: %w", err)
+	}
+	return nil
+}
+
 // Upload is a presigned S3 POST: the client sends multipart/form-data to URL
 // with Fields first and the file (field name "file") last.
 type Upload struct {
