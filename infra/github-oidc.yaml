@@ -10,10 +10,13 @@ AWSTemplateFormatVersion: "2010-09-09"
 Description: GitHub Actions OIDC deploy role for picture-ware
 
 Parameters:
-  GitHubRepo:
+  GitHubRepoSubject:
     Type: String
-    Default: a-godura/picture-ware
-    Description: owner/repo allowed to assume the deploy role
+    Default: a-godura@223130536/picture-ware@1400781056
+    Description: >-
+      Repo part of GitHub's OIDC `sub` claim. This repo uses GitHub's immutable
+      subject format (owner@ownerId/repo@repoId), which survives renames. Check with
+      `gh api repos/OWNER/REPO/actions/oidc/customization/sub` (sub_claim_prefix).
   CreateOidcProvider:
     Type: String
     AllowedValues: ["true", "false"]
@@ -48,7 +51,7 @@ Resources:
             Condition:
               StringEquals:
                 token.actions.githubusercontent.com:aud: sts.amazonaws.com
-                token.actions.githubusercontent.com:sub: !Sub repo:${GitHubRepo}:ref:refs/heads/main
+                token.actions.githubusercontent.com:sub: !Sub repo:${GitHubRepoSubject}:ref:refs/heads/main
       ManagedPolicyArns:
         - arn:aws:iam::aws:policy/PowerUserAccess
       Policies:
