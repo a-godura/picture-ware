@@ -65,6 +65,11 @@ final class PhotosModel {
         }
     }
 
+    func delete(_ photo: Photo) async throws {
+        try await api.deletePhoto(id: photo.id)
+        photos.removeAll { $0.id == photo.id }
+    }
+
     /// The backend marks a photo ready asynchronously after S3 receives it; poll briefly.
     private func waitUntilListed(id: String) async {
         for attempt in 0..<6 {

@@ -1,9 +1,13 @@
 import SwiftUI
 
-/// Sheet shown when a pin is tapped: the full image and when it was taken.
+/// Sheet shown when a pin is tapped: the full image, when it was taken, and delete.
 struct PhotoDetailView: View {
     let photo: Photo
+    let onDelete: () async throws -> Void
     @Environment(\.dismiss) private var dismiss
+    @State private var confirmingDelete = false
+    @State private var isDeleting = false
+    @State private var deleteError: String?
 
     var body: some View {
         NavigationStack {
@@ -36,11 +40,41 @@ struct PhotoDetailView: View {
             .navigationTitle("Photo")
             .navigationBarTitleDisplayMode(.inline)
             .toolbar {
+                ToolbarItem(placement: .topBarLeading) {
+                    if isDeleting {
+                        ProgressView()
+                    } else {
+                        Button("Delete", systemImage: "trash", role: .destructive) { confirmingDelete = true }
+                            .tint(.red)
+                    }
+                }
                 ToolbarItem(placement: .confirmationAction) {
                     Button("Done") { dismiss() }
                 }
             }
+            .confirmationDialog("Delete this photo?", isPresented: $confirmingDelete, titleVisibility: .visible) {
+                Button("Delete Photo", role: .destructive) { Task { await delete() } }
+            } message: {
+                Text("It will be removed from your map and deleted from storage. This can't be undone.")
+            }
+            .alert("Couldn't delete photo", isPresented: .constant(deleteError != nil)) {
+                Button("OK") { deleteError = nil }
+            } message: {
+                Text(deleteError ?? "")
+            }
         }
         .presentationDragIndicator(.visible)
+        .interactiveDismissDisabled(isDeleting)
+    }
+
+    private func delete() async {
+        isDeleting = true
+        defer { isDeleting = false }
+        do {
+            try await onDelete()
+            dismiss()
+        } catch {
+            deleteError = error.localizedDescription
+        }
     }
 }

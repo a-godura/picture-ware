@@ -6,6 +6,7 @@ import (
 	"context"
 	"encoding/base64"
 	"encoding/json"
+	"errors"
 	"log/slog"
 	"net/http"
 	"time"
@@ -19,6 +20,13 @@ import (
 type Store interface {
 	Put(ctx context.Context, p photos.Photo) error
 	ListReady(ctx context.Context, userID string) ([]photos.Photo, error)
+	// Delete returns photos.ErrNotFound if the user has no such photo.
+	Delete(ctx context.Context, userID, id string) error
+}
+
+// Objects deletes stored photo files.
+type Objects interface {
+	Delete(ctx context.Context, key string) error
 }
 
 // Presigner creates presigned S3 requests.
@@ -27,10 +35,11 @@ type Presigner interface {
 	PresignGet(ctx context.Context, key string) (string, error)
 }
 
-// Handler serves POST /photos and GET /photos.
+// Handler serves POST /photos, GET /photos and DELETE /photos/{id}.
 type Handler struct {
 	Store     Store
 	Presigner Presigner
+	Objects   Objects
 	NewID     func() string
 	Now       func() time.Time
 }
@@ -83,7 +92,7 @@ func UserID(req events.APIGatewayV2HTTPRequest) (string, bool) {
 // without usable claims is still answered 401 rather than trusted.
 func (h *Handler) Handle(ctx context.Context, req events.APIGatewayV2HTTPRequest) (events.APIGatewayV2HTTPResponse, error) {
 	switch req.RouteKey {
-	case "POST /photos", "GET /photos":
+	case "POST /photos", "GET /photos", "DELETE /photos/{id}":
 	default:
 		return errorResponse(http.StatusNotFound, "not found"), nil
 	}
@@ -92,8 +101,11 @@ func (h *Handler) Handle(ctx context.Context, req events.APIGatewayV2HTTPRequest
 		slog.WarnContext(ctx, "request without usable JWT claims", "route", req.RouteKey)
 		return errorResponse(http.StatusUnauthorized, "unauthorized"), nil
 	}
-	if req.RouteKey == "POST /photos" {
+	switch req.RouteKey {
+	case "POST /photos":
 		return h.create(ctx, userID, req), nil
+	case "DELETE /photos/{id}":
+		return h.delete(ctx, userID, req.PathParameters["id"]), nil
 	}
 	return h.list(ctx, userID), nil
 }
@@ -161,6 +173,28 @@ func (h *Handler) list(ctx context.Context, userID string) events.APIGatewayV2HT
 		})
 	}
 	return jsonResponse(http.StatusOK, out)
+}
+
+// delete removes the file first, then the record, so a failure part-way
+// leaves the record in place and the client can retry. Keys are scoped to
+// userID, so a caller can only ever touch their own photos.
+func (h *Handler) delete(ctx context.Context, userID, id string) events.APIGatewayV2HTTPResponse {
+	if !photos.ValidPhotoID(id) {
+		return errorResponse(http.StatusNotFound, "photo not found")
+	}
+	if err := h.Objects.Delete(ctx, photos.ObjectKey(userID, id)); err != nil {
+		slog.ErrorContext(ctx, "delete object failed", "id", id, "err", err)
+		return errorResponse(http.StatusInternalServerError, "internal error")
+	}
+	err := h.Store.Delete(ctx, userID, id)
+	if errors.Is(err, photos.ErrNotFound) {
+		return errorResponse(http.StatusNotFound, "photo not found")
+	}
+	if err != nil {
+		slog.ErrorContext(ctx, "store delete failed", "id", id, "err", err)
+		return errorResponse(http.StatusInternalServerError, "internal error")
+	}
+	return events.APIGatewayV2HTTPResponse{StatusCode: http.StatusNoContent}
 }
 
 type errorBody struct {

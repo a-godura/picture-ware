@@ -87,6 +87,25 @@ struct NetworkTests {
         #expect(body?["takenAt"] == nil)
     }
 
+    @Test func deletePhotoSendsDelete() async throws {
+        StubURLProtocol.install { _ in (204, Data()) }
+        try await api.deletePhoto(id: "p1")
+        let request = try #require(StubURLProtocol.requests.first)
+        #expect(request.url?.absoluteString == "https://api.example.com/photos/p1")
+        #expect(request.httpMethod == "DELETE")
+        #expect(request.value(forHTTPHeaderField: "Authorization") == "Bearer old-token")
+    }
+
+    @Test func deleteOfMissingPhotoSucceeds() async throws {
+        StubURLProtocol.install { _ in (404, Data(#"{"error":"photo not found"}"#.utf8)) }
+        try await api.deletePhoto(id: "gone")
+    }
+
+    @Test func deleteServerErrorIsSurfaced() async throws {
+        StubURLProtocol.install { _ in (500, Data(#"{"error":"internal error"}"#.utf8)) }
+        await #expect(throws: APIError.http(status: 500, message: "internal error")) { try await api.deletePhoto(id: "p1") }
+    }
+
     @Test func uploadGoesToS3WithoutBearer() async throws {
         StubURLProtocol.install { _ in (204, Data()) }
         let target = UploadTarget(url: URL(string: "https://bucket.s3.amazonaws.com")!, fields: ["key": "photos/abc"])

@@ -21,6 +21,10 @@ type fakeStore struct {
 	putErr   error
 	listErr  error
 	listUser string
+
+	deleted   []string // "userID/id" of successful deletes
+	deleteErr error    // returned instead of deleting
+	exists    map[string]bool
 }
 
 func (f *fakeStore) Put(_ context.Context, p photos.Photo) error {
@@ -37,6 +41,30 @@ func (f *fakeStore) ListReady(_ context.Context, userID string) ([]photos.Photo,
 		return nil, f.listErr
 	}
 	return f.ready, f.listErr
+}
+
+func (f *fakeStore) Delete(_ context.Context, userID, id string) error {
+	if f.deleteErr != nil {
+		return f.deleteErr
+	}
+	if !f.exists[userID+"/"+id] {
+		return photos.ErrNotFound
+	}
+	f.deleted = append(f.deleted, userID+"/"+id)
+	return nil
+}
+
+type fakeObjects struct {
+	deleted []string
+	err     error
+}
+
+func (f *fakeObjects) Delete(_ context.Context, key string) error {
+	if f.err != nil {
+		return f.err
+	}
+	f.deleted = append(f.deleted, key)
+	return nil
 }
 
 type fakePresigner struct {
@@ -74,7 +102,7 @@ func authed(routeKey, sub string) events.APIGatewayV2HTTPRequest {
 }
 
 func newHandler(s *fakeStore, p *fakePresigner) *Handler {
-	return &Handler{Store: s, Presigner: p, NewID: func() string { return "id-1" }, Now: func() time.Time { return fixedNow }}
+	return &Handler{Store: s, Presigner: p, Objects: &fakeObjects{}, NewID: func() string { return "id-1" }, Now: func() time.Time { return fixedNow }}
 }
 
 func errMsg(t *testing.T, body string) string {
@@ -293,4 +321,62 @@ func TestUnknownRoute(t *testing.T) {
 		t.Fatalf("status = %d", resp.StatusCode)
 	}
 	errMsg(t, resp.Body)
+}
+
+func TestDelete(t *testing.T) {
+	const otherUser = "0a0a0a0a-2222-4b4b-8c8c-0123456789ab"
+	tests := []struct {
+		name        string
+		user        string
+		id          string
+		store       *fakeStore
+		objects     *fakeObjects
+		wantStatus  int
+		wantObject  bool // object delete attempted
+		wantDeleted bool // record deleted
+	}{
+		{name: "ok", user: testUser, id: "p1", wantStatus: http.StatusNoContent, wantObject: true, wantDeleted: true},
+		{name: "missing", user: testUser, id: "nope", wantStatus: http.StatusNotFound, wantObject: true},
+		{name: "other user's photo", user: otherUser, id: "p1", wantStatus: http.StatusNotFound, wantObject: true},
+		{name: "invalid id", user: testUser, id: "../p1", wantStatus: http.StatusNotFound},
+		{name: "empty id", user: testUser, id: "", wantStatus: http.StatusNotFound},
+		{name: "object delete fails keeps record", user: testUser, id: "p1", objects: &fakeObjects{err: errors.New("boom")}, wantStatus: http.StatusInternalServerError},
+		{name: "store error", user: testUser, id: "p1", store: &fakeStore{deleteErr: errors.New("boom")}, wantStatus: http.StatusInternalServerError, wantObject: true},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			s, o := tt.store, tt.objects
+			if s == nil {
+				s = &fakeStore{exists: map[string]bool{testUser + "/p1": true}}
+			}
+			if o == nil {
+				o = &fakeObjects{}
+			}
+			h := newHandler(s, &fakePresigner{})
+			h.Objects = o
+			req := authed("DELETE /photos/{id}", tt.user)
+			req.PathParameters = map[string]string{"id": tt.id}
+			resp, err := h.Handle(context.Background(), req)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if resp.StatusCode != tt.wantStatus {
+				t.Fatalf("status = %d, want %d (body %s)", resp.StatusCode, tt.wantStatus, resp.Body)
+			}
+			if tt.wantStatus != http.StatusNoContent {
+				errMsg(t, resp.Body)
+			} else if resp.Body != "" {
+				t.Fatalf("204 body = %q, want empty", resp.Body)
+			}
+			if got := len(o.deleted) == 1; got != tt.wantObject {
+				t.Fatalf("object deleted = %v, want %v (%v)", got, tt.wantObject, o.deleted)
+			}
+			if tt.wantObject && o.deleted[0] != photos.ObjectKey(tt.user, tt.id) {
+				t.Fatalf("deleted key %q, want caller-scoped %q", o.deleted[0], photos.ObjectKey(tt.user, tt.id))
+			}
+			if got := len(s.deleted) == 1; got != tt.wantDeleted {
+				t.Fatalf("record deleted = %v, want %v", got, tt.wantDeleted)
+			}
+		})
+	}
 }

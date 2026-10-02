@@ -38,6 +38,14 @@ struct APIClient: Sendable {
         return try APICoding.decoder().decode(CreatePhotoResponse.self, from: data)
     }
 
+    /// Deletes one of the user's photos. A 404 means it's already gone, which is what the caller wanted.
+    func deletePhoto(id: String) async throws {
+        do {
+            _ = try await send(request(path: "photos/\(id)", method: "DELETE"), expecting: 204)
+        } catch APIError.http(status: 404, _) {
+        }
+    }
+
     /// Uploads the file to the presigned S3 POST. No bearer token: S3 authorizes via the policy fields.
     func upload(_ file: Data, contentType: PhotoContentType, to target: UploadTarget,
                 progress: (@Sendable (Double) -> Void)? = nil) async throws {

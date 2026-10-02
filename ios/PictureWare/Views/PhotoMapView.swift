@@ -33,7 +33,9 @@ struct PhotoMapView: View {
         .ignoresSafeArea()
         .overlay(alignment: .topTrailing) { menu }
         .overlay(alignment: .bottom) { bottomBar }
-        .sheet(item: $selected) { PhotoDetailView(photo: $0) }
+        .sheet(item: $selected) { photo in
+            PhotoDetailView(photo: photo) { try await model.delete(photo) }
+        }
         .task { await model.load() }
         .onChange(of: model.fitGeneration) { fitToPins() }
         .onChange(of: pickerItem) { _, item in

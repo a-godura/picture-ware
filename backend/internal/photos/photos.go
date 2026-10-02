@@ -72,6 +72,11 @@ func ValidUserID(s string) bool {
 	return true
 }
 
+// ValidPhotoID reports whether s is safe to use as a photo id key segment.
+// Ids are server-generated UUIDs; this uses the same conservative charset as
+// ValidUserID.
+func ValidPhotoID(s string) bool { return ValidUserID(s) }
+
 // CreateRequest is the body of POST /photos.
 type CreateRequest struct {
 	Lat         *float64 `json:"lat"`

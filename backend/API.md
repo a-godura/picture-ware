@@ -200,6 +200,17 @@ oversized files (S3 may also just reset the connection).
 - No pagination in v1 (one DynamoDB Query on the caller's `userId` partition).
 - Errors: `401` (see Authentication), `429`, `500`.
 
+## `DELETE /photos/{id}`
+
+Deletes one of the caller's photos: the S3 object first, then the record, so
+a failure part-way leaves the photo listed and the client can simply retry.
+
+- `204 No Content` (empty body) on success.
+- `404 {"error":"photo not found"}` if the caller has no photo with that id —
+  including ids that belong to another user (they're indistinguishable).
+- Deleting a `pending` photo (upload never finished) also works.
+- Errors: `401` (see Authentication), `404`, `429`, `500`.
+
 ## Limits and cost guardrails
 
 - **Throttling:** HTTP API default route throttling of **5 req/s, burst 10**
