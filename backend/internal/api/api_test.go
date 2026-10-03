@@ -12,6 +12,7 @@ import (
 
 	"github.com/aws/aws-lambda-go/events"
 
+	"github.com/a-godura/picture-ware/backend/internal/contracttest"
 	"github.com/a-godura/picture-ware/backend/internal/photos"
 )
 
@@ -141,7 +142,7 @@ func (f *fakePresigner) PresignUpload(_ context.Context, key, ct string) (photos
 	if f.uploadErr != nil {
 		return photos.Upload{}, f.uploadErr
 	}
-	return photos.Upload{URL: "https://bucket.example", Fields: map[string]string{"key": key, "Content-Type": ct}}, nil
+	return photos.Upload{URL: "https://bucket.example", Fields: map[string]string{"key": key, "Content-Type": ct, "policy": "cG9saWN5"}}, nil
 }
 
 func (f *fakePresigner) PresignGet(_ context.Context, key string) (string, error) {
@@ -196,6 +197,7 @@ func (hs *harness) do(t *testing.T, req events.APIGatewayV2HTTPRequest) events.A
 	if err != nil {
 		t.Fatal(err)
 	}
+	contracttest.Check(t, req, resp)
 	return resp
 }
 
@@ -521,5 +523,14 @@ func TestMissingClaimsUnauthorized(t *testing.T) {
 }
 
 func TestUnknownRoute(t *testing.T) {
-	expectStatus(t, newHarness(newStore()).do(t, authed("GET /photos", testUser)), http.StatusNotFound)
+	expectStatus(t, newHarness(newStore()).do(t, authed("DELETE /trips", testUser)), http.StatusNotFound)
+
+	// The legacy /photos routes are served by internal/legacy/api, not this
+	// handler. Called directly: they're documented routes whose contract has
+	// no 404, so the contract check doesn't apply to this handler's answer.
+	resp, err := newHarness(newStore()).h.Handle(context.Background(), authed("GET /photos", testUser))
+	if err != nil {
+		t.Fatal(err)
+	}
+	expectStatus(t, resp, http.StatusNotFound)
 }

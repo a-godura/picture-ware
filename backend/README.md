@@ -18,7 +18,7 @@ cmd/processor    S3 ObjectCreated on photos/<tripId>/<id> -> mark item ready
 cmd/killswitch   budget SNS -> throttle API to 0, zero Lambda concurrency
 internal/...     handlers (depend on small interfaces) + AWS adapters
 template.yaml    SAM template (Cognito pool/domain/clients, bucket, table, API, functions, kill switch)
-scripts/         smoke.sh (end-to-end test), killswitch-reset.sh, one-off migrations
+scripts/         smoke.sh (end-to-end test), killswitch-reset.sh
 ```
 
 ## Prerequisites

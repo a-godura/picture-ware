@@ -80,7 +80,6 @@ Resources:
               Bool:
                 aws:SecureTransport: "false"
 
-  # Owner-scoped: partition = Cognito sub, sort = photo id.
   # One table for trips, members and photos, keyed by generic PK/SK strings
   # (see internal/photos/store.go for the item shapes).
   AppTable:
@@ -453,7 +452,7 @@ Outputs:
     Description: Legacy per-user photo table (/photos routes)
     Value: !Ref PhotosByUserTable
   TableName:
-    Description: Photo metadata table (pk userId, sk id)
+    Description: App table for trips, members and photos (generic PK/SK)
     Value: !Ref AppTable
   UserPoolId:
     Description: Cognito user pool id (JWT issuer is https://cognito-idp.<region>.amazonaws.com/<UserPoolId>)

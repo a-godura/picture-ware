@@ -1,5 +1,8 @@
 # picture-ware API (v1)
 
+The authoritative, machine-checked contract (with examples) is
+[`api/openapi.yaml`](../api/openapi.yaml); this page is a readable overview.
+
 Base URL: the `ApiUrl` output of the `picture-ware` CloudFormation stack
 (`https://<api-id>.execute-api.us-east-2.amazonaws.com`).
 

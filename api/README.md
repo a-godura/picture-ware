@@ -4,9 +4,12 @@
 backend. Each side is tested against it on its own, so neither needs the
 other running:
 
-- **Backend**: every response produced in `backend/internal/api` tests is
-  validated against the contract, and the routes in `backend/template.yaml`
-  must be exactly the documented ones (`go test ./internal/api/`).
+- **Backend**: every response produced in the handler tests
+  (`backend/internal/api` for `/trips`, `backend/internal/legacy/api` for
+  `/photos`) is validated against the contract via
+  `backend/internal/contracttest`, and the routes in `backend/template.yaml`
+  must be exactly the documented ones (`go test ./internal/...` from
+  `backend/`).
 - **CI** (`contract / breaking-changes`): a PR fails if it changes the contract
   in a way that breaks clients built against `main` (removed routes or fields,
   new required inputs, ...). Additive changes pass. A deliberate breaking
