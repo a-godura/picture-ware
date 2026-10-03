@@ -2,11 +2,20 @@ import SwiftUI
 
 @main
 struct PictureWareApp: App {
+    @UIApplicationDelegateAdaptor(UploadAppDelegate.self) private var uploadDelegate
     @State private var auth = AuthService(config: AppConfig.load())
 
     var body: some Scene {
         WindowGroup {
+            #if DEBUG
+            if UploadDemo.isEnabled {
+                UploadDemoView()
+            } else {
+                RootView(auth: auth)
+            }
+            #else
             RootView(auth: auth)
+            #endif
         }
     }
 }

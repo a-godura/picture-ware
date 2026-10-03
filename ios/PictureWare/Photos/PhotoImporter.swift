@@ -11,9 +11,16 @@ enum PhotoImporter {
         guard let data = try await item.loadTransferable(type: Data.self) else {
             throw UploadPreparationError.unreadableImage
         }
+        return try await prepare(data: data, itemIdentifier: item.itemIdentifier,
+                                 declaredType: item.supportedContentTypes.first { $0.conforms(to: .image) })
+    }
+
+    /// Same as `prepare(_:)` for bytes that were already loaded (bulk import loads once, so it can
+    /// also thumbnail photos it has to reject).
+    static func prepare(data: Data, itemIdentifier: String?, declaredType: UTType?) async throws -> PreparedUpload {
         var metadata = LocationExtractor.metadata(from: data)
 
-        if metadata.location == nil, let identifier = item.itemIdentifier,
+        if metadata.location == nil, let identifier = itemIdentifier,
            let asset = await libraryAsset(identifier: identifier) {
             if let location = asset.location {
                 let point = GeoPoint(latitude: location.coordinate.latitude, longitude: location.coordinate.longitude)
@@ -23,7 +30,6 @@ enum PhotoImporter {
         }
 
         guard let location = metadata.location else { throw UploadPreparationError.noLocation }
-        let declaredType = item.supportedContentTypes.first { $0.conforms(to: .image) }
         let (fileData, contentType) = try UploadPreparation.encode(data, declaredType: declaredType)
         return PreparedUpload(data: fileData, contentType: contentType, location: location, takenAt: metadata.takenAt)
     }
