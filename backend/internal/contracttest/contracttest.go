@@ -127,14 +127,28 @@ func fillPath(path string, params map[string]string) string {
 	return path
 }
 
+// PlannedExtension marks an operation that is in the contract but not
+// deployed yet ("x-planned: true"), so a contract PR can land before the
+// backend PR that implements it. The backend PR removes the marker in the
+// same change that adds the route to template.yaml.
+const PlannedExtension = "x-planned"
+
+// Planned reports whether op is marked x-planned: true.
+func Planned(op *openapi3.Operation) bool {
+	v, ok := op.Extensions[PlannedExtension]
+	return ok && v == true
+}
+
 // CheckDeployedRoutes fails the test unless the HttpApi events in
-// template.yaml are exactly the operations in the contract.
+// template.yaml are exactly the contract's operations that aren't planned.
 func CheckDeployedRoutes(t testing.TB) {
 	t.Helper()
 	var documented []string
 	for path, item := range Spec(t).Paths.Map() {
-		for method := range item.Operations() {
-			documented = append(documented, method+" "+path)
+		for method, op := range item.Operations() {
+			if !Planned(op) {
+				documented = append(documented, method+" "+path)
+			}
 		}
 	}
 
@@ -164,8 +178,8 @@ func CheckDeployedRoutes(t testing.TB) {
 	sort.Strings(documented)
 	sort.Strings(deployed)
 	if strings.Join(documented, "\n") != strings.Join(deployed, "\n") {
-		t.Fatalf("routes differ\ncontract (%s):\n  %s\n%s:\n  %s",
-			specFile, strings.Join(documented, "\n  "), templateFile, strings.Join(deployed, "\n  "))
+		t.Fatalf("routes differ (operations marked %s: true don't count; remove the marker when deploying them)\ncontract (%s):\n  %s\n%s:\n  %s",
+			PlannedExtension, specFile, strings.Join(documented, "\n  "), templateFile, strings.Join(deployed, "\n  "))
 	}
 }
 
