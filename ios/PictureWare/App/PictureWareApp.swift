@@ -8,7 +8,9 @@ struct PictureWareApp: App {
     var body: some Scene {
         WindowGroup {
             #if DEBUG
-            if UploadDemo.isEnabled {
+            if LaunchOptions.useMockAPI {
+                MockRootView() // `-MockAPI YES`: signed-in UI on MockAPI (contract examples), no backend
+            } else if UploadDemo.isEnabled {
                 UploadDemoView()
             } else if ExportDemo.isEnabled {
                 ExportDemoView() // `-PWExportDemo YES`: Save to Photos / Files on sample files
@@ -43,7 +45,7 @@ struct RootView: View {
         case .signedOut:
             SignedOutView(auth: auth)
         case .signedIn:
-            PhotoMapView(auth: auth)
+            PhotoMapView(api: APIClient(baseURL: auth.config.apiURL, tokens: auth)) { await auth.signOut() }
         }
     }
 }

@@ -22,6 +22,10 @@ targets:
     platform: iOS
     sources:
       - path: PictureWare
+      # The API contract, for mock mode (Debug only; excluded from Release below).
+      # Regenerate from openapi.yaml with scripts/sync-contract.sh.
+      - path: ../api/openapi.json
+        buildPhase: resources
     configFiles:
       Debug: Config/Config.xcconfig
       Release: Config/Config.xcconfig
@@ -59,11 +63,18 @@ targets:
         ASSETCATALOG_COMPILER_APPICON_NAME: AppIcon
         ASSETCATALOG_COMPILER_GLOBAL_ACCENT_COLOR_NAME: AccentColor
         CODE_SIGN_STYLE: Automatic
+      configs:
+        Release:
+          # Mock mode (MockAPI, ContractDocument) is compiled out of Release with
+          # #if DEBUG; this keeps the contract it reads out of the bundle too.
+          EXCLUDED_SOURCE_FILE_NAMES: openapi.json
   PictureWareTests:
     type: bundle.unit-test
     platform: iOS
     sources:
       - path: PictureWareTests
+      - path: ../api/openapi.json
+        buildPhase: resources
     dependencies:
       - target: PictureWare
     settings:
@@ -84,3 +95,13 @@ schemes:
         - PictureWareTests
     archive:
       config: Release
+  # Debug build launched with -MockAPI YES: the signed-in UI backed by MockAPI
+  # (seeded from the contract's examples), with no backend and no sign-in.
+  PictureWare (Mock):
+    build:
+      targets:
+        PictureWare: all
+    run:
+      config: Debug
+      commandLineArguments:
+        "-MockAPI YES": true

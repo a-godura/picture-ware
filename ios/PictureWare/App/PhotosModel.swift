@@ -11,9 +11,9 @@ final class PhotosModel {
     /// Bumped whenever the map should re-fit to the pins.
     private(set) var fitGeneration = 0
 
-    @ObservationIgnored private let api: APIClient
+    @ObservationIgnored private let api: any PhotosAPI
 
-    init(api: APIClient) {
+    init(api: any PhotosAPI) {
         self.api = api
     }
 
