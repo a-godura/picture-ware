@@ -1,0 +1,229 @@
+openapi: 3.0.3
+info:
+  title: picture-ware API
+  version: "1"
+  description: |
+    The contract between the iOS app and the backend. Both sides test against
+    this file: the backend checks its responses match it, the app's tests and
+    mock mode use its examples. Changes that would break existing clients are
+    rejected in CI (oasdiff); evolve it additively, then remove old parts once
+    no client uses them.
+
+    Every route requires a Cognito **access token** (`Authorization: Bearer`).
+    API Gateway rejects missing/invalid tokens itself with
+    `{"message": "Unauthorized"}`; errors from the API use `{"error": "..."}`.
+servers:
+  - url: https://371v2nw03l.execute-api.us-east-2.amazonaws.com
+security:
+  - cognito: []
+
+paths:
+  /photos:
+    post:
+      operationId: createPhoto
+      summary: Create a photo record and get a presigned S3 upload
+      description: |
+        The record is `pending` (not listed) until the upload lands in S3.
+        Upload with `multipart/form-data` to `upload.url`: every entry of
+        `upload.fields` first, then the image in a field named `file`.
+        The upload policy pins the exact key and Content-Type, 1 byte–15 MiB,
+        and expires after 10 minutes.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/CreatePhotoRequest" }
+            examples:
+              withTakenAt:
+                value: { lat: 37.8199, lng: -122.4783, takenAt: "2026-09-21T01:45:00Z", contentType: image/jpeg }
+      responses:
+        "201":
+          description: Created
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/CreatePhotoResponse" }
+              examples:
+                created:
+                  value:
+                    id: 33e9a540-94a9-4645-b252-6d8a36ce9ac9
+                    upload:
+                      url: https://picture-ware-photosbucket-example.s3.us-east-2.amazonaws.com
+                      fields:
+                        key: photos/511b25d0-40a1-705d-f49c-7e89f72c4924/33e9a540-94a9-4645-b252-6d8a36ce9ac9
+                        Content-Type: image/jpeg
+                        policy: eyJleGFtcGxlIjp0cnVlfQ==
+                        X-Amz-Algorithm: AWS4-HMAC-SHA256
+                        X-Amz-Credential: EXAMPLE/20261003/us-east-2/s3/aws4_request
+                        X-Amz-Date: 20261003T180000Z
+                        X-Amz-Signature: "0000000000000000000000000000000000000000000000000000000000000000"
+        "400": { $ref: "#/components/responses/BadRequest" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "413": { $ref: "#/components/responses/TooLarge" }
+        "429": { $ref: "#/components/responses/Throttled" }
+        "500": { $ref: "#/components/responses/InternalError" }
+    get:
+      operationId: listPhotos
+      summary: List the caller's ready photos
+      description: Only photos with status `ready`. `imageUrl` is a presigned GET valid for about an hour.
+      responses:
+        "200":
+          description: OK
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/PhotoList" }
+              examples:
+                twoPhotos:
+                  value:
+                    photos:
+                      - id: 33e9a540-94a9-4645-b252-6d8a36ce9ac9
+                        lat: 37.8199
+                        lng: -122.4783
+                        takenAt: "2026-09-21T01:45:00Z"
+                        createdAt: "2026-10-02T20:34:10Z"
+                        imageUrl: https://picture-ware-photosbucket-example.s3.us-east-2.amazonaws.com/photos/511b25d0-40a1-705d-f49c-7e89f72c4924/33e9a540-94a9-4645-b252-6d8a36ce9ac9?X-Amz-Signature=example
+                      - id: cdb2d30a-f31c-4814-ae3c-6a299dfb36b4
+                        lat: 64.752895
+                        lng: -14.538611666666666
+                        takenAt: null
+                        createdAt: "2026-10-02T20:35:30Z"
+                        imageUrl: https://picture-ware-photosbucket-example.s3.us-east-2.amazonaws.com/photos/511b25d0-40a1-705d-f49c-7e89f72c4924/cdb2d30a-f31c-4814-ae3c-6a299dfb36b4?X-Amz-Signature=example
+                empty:
+                  value: { photos: [] }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "429": { $ref: "#/components/responses/Throttled" }
+        "500": { $ref: "#/components/responses/InternalError" }
+
+  /photos/{id}:
+    delete:
+      operationId: deletePhoto
+      summary: Delete one of the caller's photos
+      description: |
+        Deletes the S3 object, then the record. Ids that don't exist or belong
+        to someone else are indistinguishable (404).
+      parameters:
+        - { name: id, in: path, required: true, schema: { type: string } }
+      responses:
+        "204": { description: Deleted }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "404": { $ref: "#/components/responses/NotFound" }
+        "429": { $ref: "#/components/responses/Throttled" }
+        "500": { $ref: "#/components/responses/InternalError" }
+
+components:
+  securitySchemes:
+    cognito:
+      type: http
+      scheme: bearer
+      bearerFormat: JWT
+      description: Cognito access token (ID tokens are rejected).
+
+  schemas:
+    CreatePhotoRequest:
+      type: object
+      additionalProperties: false
+      required: [lat, lng, contentType]
+      properties:
+        lat: { type: number, minimum: -90, maximum: 90 }
+        lng: { type: number, minimum: -180, maximum: 180 }
+        takenAt: { type: string, format: date-time, description: When the photo was taken (RFC 3339). }
+        contentType: { $ref: "#/components/schemas/PhotoContentType" }
+
+    PhotoContentType:
+      type: string
+      enum: [image/jpeg, image/heic]
+
+    CreatePhotoResponse:
+      type: object
+      additionalProperties: false
+      required: [id, upload]
+      properties:
+        id: { type: string }
+        upload: { $ref: "#/components/schemas/Upload" }
+
+    Upload:
+      type: object
+      additionalProperties: false
+      description: Presigned S3 POST. Send every field, then the file last as `file`.
+      required: [url, fields]
+      properties:
+        url: { type: string, format: uri }
+        fields:
+          type: object
+          additionalProperties: { type: string }
+          required: [key, Content-Type, policy]
+
+    PhotoList:
+      type: object
+      additionalProperties: false
+      required: [photos]
+      properties:
+        photos:
+          type: array
+          items: { $ref: "#/components/schemas/Photo" }
+
+    Photo:
+      type: object
+      additionalProperties: false
+      required: [id, lat, lng, takenAt, createdAt, imageUrl]
+      properties:
+        id: { type: string }
+        lat: { type: number, minimum: -90, maximum: 90 }
+        lng: { type: number, minimum: -180, maximum: 180 }
+        takenAt: { type: string, format: date-time, nullable: true }
+        createdAt: { type: string, format: date-time }
+        imageUrl: { type: string, format: uri, description: "Presigned GET, valid about an hour." }
+
+    Error:
+      type: object
+      additionalProperties: false
+      required: [error]
+      properties:
+        error: { type: string }
+
+    GatewayError:
+      type: object
+      description: Errors produced by API Gateway itself (auth, throttling, unknown route).
+      required: [message]
+      properties:
+        message: { type: string }
+
+  responses:
+    BadRequest:
+      description: Malformed JSON, unknown field, or validation failure
+      content:
+        application/json:
+          schema: { $ref: "#/components/schemas/Error" }
+          example: { error: "validation failed: lat must be between -90 and 90" }
+    Unauthorized:
+      description: Missing, invalid or wrong kind of token
+      content:
+        application/json:
+          schema:
+            oneOf:
+              - $ref: "#/components/schemas/GatewayError"
+              - $ref: "#/components/schemas/Error"
+          example: { message: Unauthorized }
+    NotFound:
+      description: Not found
+      content:
+        application/json:
+          schema: { $ref: "#/components/schemas/Error" }
+          example: { error: photo not found }
+    TooLarge:
+      description: Request body over 4 KiB
+      content:
+        application/json:
+          schema: { $ref: "#/components/schemas/Error" }
+          example: { error: request body too large }
+    Throttled:
+      description: Rate limited by API Gateway
+      content:
+        application/json:
+          schema: { $ref: "#/components/schemas/GatewayError" }
+          example: { message: Too Many Requests }
+    InternalError:
+      description: Internal error
+      content:
+        application/json:
+          schema: { $ref: "#/components/schemas/Error" }
+          example: { error: internal error }

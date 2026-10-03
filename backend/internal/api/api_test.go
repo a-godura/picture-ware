@@ -78,7 +78,7 @@ func (f *fakePresigner) PresignUpload(_ context.Context, key, ct string) (photos
 	if f.uploadErr != nil {
 		return photos.Upload{}, f.uploadErr
 	}
-	return photos.Upload{URL: "https://bucket.example", Fields: map[string]string{"key": key, "Content-Type": ct}}, nil
+	return photos.Upload{URL: "https://bucket.example", Fields: map[string]string{"key": key, "Content-Type": ct, "policy": "cG9saWN5"}}, nil
 }
 
 func (f *fakePresigner) PresignGet(_ context.Context, key string) (string, error) {
@@ -150,7 +150,7 @@ func TestCreate(t *testing.T) {
 			}
 			req := authed("POST /photos", testUser)
 			req.Body, req.IsBase64Encoded = body, tt.b64
-			resp, err := newHandler(s, p).Handle(context.Background(), req)
+			resp, err := newHandler(s, p).handleT(t, req)
 			if err != nil {
 				t.Fatal(err)
 			}
@@ -211,7 +211,7 @@ func TestList(t *testing.T) {
 			if p == nil {
 				p = &fakePresigner{}
 			}
-			resp, err := newHandler(tt.store, p).Handle(context.Background(), authed("GET /photos", testUser))
+			resp, err := newHandler(tt.store, p).handleT(t, authed("GET /photos", testUser))
 			if err != nil {
 				t.Fatal(err)
 			}
@@ -248,7 +248,7 @@ func TestList(t *testing.T) {
 
 func TestListIsOwnerScoped(t *testing.T) {
 	s := &fakeStore{ready: []photos.Photo{{ID: "a", Status: photos.StatusReady}}}
-	resp, _ := newHandler(s, &fakePresigner{}).Handle(context.Background(), authed("GET /photos", "someone-else"))
+	resp, _ := newHandler(s, &fakePresigner{}).handleT(t, authed("GET /photos", "someone-else"))
 	if resp.StatusCode != http.StatusOK || s.listUser != "someone-else" {
 		t.Fatalf("status %d, listed user %q", resp.StatusCode, s.listUser)
 	}
@@ -300,7 +300,7 @@ func TestMissingClaimsUnauthorized(t *testing.T) {
 		t.Run(route, func(t *testing.T) {
 			s := &fakeStore{}
 			req := events.APIGatewayV2HTTPRequest{RouteKey: route, Body: `{"lat":1,"lng":1,"contentType":"image/jpeg"}`}
-			resp, err := newHandler(s, &fakePresigner{}).Handle(context.Background(), req)
+			resp, err := newHandler(s, &fakePresigner{}).handleT(t, req)
 			if err != nil {
 				t.Fatal(err)
 			}
@@ -316,7 +316,7 @@ func TestMissingClaimsUnauthorized(t *testing.T) {
 }
 
 func TestUnknownRoute(t *testing.T) {
-	resp, _ := newHandler(&fakeStore{}, &fakePresigner{}).Handle(context.Background(), authed("DELETE /photos", testUser))
+	resp, _ := newHandler(&fakeStore{}, &fakePresigner{}).handleT(t, authed("DELETE /photos", testUser))
 	if resp.StatusCode != http.StatusNotFound {
 		t.Fatalf("status = %d", resp.StatusCode)
 	}
@@ -356,7 +356,7 @@ func TestDelete(t *testing.T) {
 			h.Objects = o
 			req := authed("DELETE /photos/{id}", tt.user)
 			req.PathParameters = map[string]string{"id": tt.id}
-			resp, err := h.Handle(context.Background(), req)
+			resp, err := h.handleT(t, req)
 			if err != nil {
 				t.Fatal(err)
 			}

@@ -6,6 +6,7 @@ on:
     branches: [main]
     paths:
       - "backend/**"
+      - "api/**"
       - ".github/workflows/backend.yml"
   workflow_dispatch:
 
@@ -44,7 +45,7 @@ jobs:
         run: |
           if [ "$EVENT" != "pull_request" ]; then
             echo "run=true" >> "$GITHUB_OUTPUT"
-          elif git diff --name-only "$BASE...$HEAD" | grep -qE '^(backend/|\.github/workflows/backend\.yml$)'; then
+          elif git diff --name-only "$BASE...$HEAD" | grep -qE '^(backend/|api/|\.github/workflows/backend\.yml$)'; then
             echo "run=true" >> "$GITHUB_OUTPUT"
           else
             echo "run=false" >> "$GITHUB_OUTPUT"
