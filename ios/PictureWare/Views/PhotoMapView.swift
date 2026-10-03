@@ -8,7 +8,7 @@ struct PhotoMapView: View {
     @State private var model: PhotosModel
     @State private var position: MapCameraPosition = .automatic
     @State private var pickerItem: PhotosPickerItem?
-    @State private var selected: Photo?
+    @State private var experience = MapExperience()
     @Environment(\.scenePhase) private var scenePhase
 
     init(auth: AuthService) {
@@ -17,25 +17,16 @@ struct PhotoMapView: View {
     }
 
     var body: some View {
-        Map(position: $position) {
-            ForEach(model.photos) { photo in
-                Annotation("", coordinate: photo.coordinate, anchor: .bottom) {
-                    Button { selected = photo } label: { PhotoPin(url: photo.imageUrl) }
-                        .buttonStyle(.plain)
-                        .accessibilityLabel(photo.takenAt.map { "Photo taken \($0.formatted(date: .abbreviated, time: .shortened))" } ?? "Photo")
-                }
+        // Clustering, replay, uploader filter and the swipe viewer live in Map/.
+        TripMap(experience: experience, position: $position) { try await model.delete($0) }
+        .overlay(alignment: .topTrailing) { menu }
+        .overlay(alignment: .bottom) {
+            VStack(spacing: 0) {
+                TimelineBar(experience: experience).padding([.horizontal, .top])
+                bottomBar
             }
         }
-        .mapControls {
-            MapCompass()
-            MapScaleView()
-        }
-        .ignoresSafeArea()
-        .overlay(alignment: .topTrailing) { menu }
-        .overlay(alignment: .bottom) { bottomBar }
-        .sheet(item: $selected) { photo in
-            PhotoDetailView(photo: photo) { try await model.delete(photo) }
-        }
+        .onChange(of: model.photos, initial: true) { experience.photos = model.photos }
         .task { await model.load() }
         .onChange(of: model.fitGeneration) { fitToPins() }
         .onChange(of: pickerItem) { _, item in
@@ -90,27 +81,6 @@ struct PhotoMapView: View {
     private func fitToPins() {
         guard let rect = MapFit.rect(for: model.photos.map(\.coordinate)) else { return }
         withAnimation { position = .rect(rect) }
-    }
-}
-
-private struct PhotoPin: View {
-    let url: URL
-
-    var body: some View {
-        AsyncImage(url: url) { phase in
-            if let image = phase.image {
-                image.resizable().scaledToFill()
-            } else if phase.error != nil {
-                Image(systemName: "photo").foregroundStyle(.secondary)
-            } else {
-                ProgressView()
-            }
-        }
-        .frame(width: 48, height: 48)
-        .background(.background)
-        .clipShape(Circle())
-        .overlay(Circle().stroke(.white, lineWidth: 3))
-        .shadow(radius: 3, y: 1)
     }
 }
 
