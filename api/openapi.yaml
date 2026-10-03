@@ -458,6 +458,73 @@ paths:
         "429": { $ref: "#/components/responses/Throttled" }
         "500": { $ref: "#/components/responses/InternalError" }
 
+  # ---------- Me ----------
+  # The caller's own profile. Members see each other only by the display
+  # name chosen here, never by email.
+
+  /me:
+    get:
+      operationId: getMe
+      x-planned: true
+      summary: Get the caller's profile
+      description: "`displayName` is `null` until the user sets one (the app asks on first run)."
+      responses:
+        "200":
+          description: OK
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Profile" }
+              examples:
+                named:
+                  value: { userId: 511b25d0-40a1-705d-f49c-7e89f72c4924, displayName: Ana }
+                notYetNamed:
+                  summary: New user who hasn't chosen a name
+                  value: { userId: 2c4d8e10-a0b1-70c2-9d3e-5f6a7b8c9d0e, displayName: null }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "429": { $ref: "#/components/responses/Throttled" }
+        "500": { $ref: "#/components/responses/InternalError" }
+    patch:
+      operationId: updateMe
+      x-planned: true
+      summary: Set the caller's display name
+      description: |
+        What friends see in trips (member lists, invite previews). Trimmed;
+        1–50 characters after trimming; no control characters. Takes effect
+        everywhere at once (names are resolved when read).
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/UpdateProfileRequest" }
+            examples:
+              simple:
+                value: { displayName: Ana }
+              withEmoji:
+                value: { displayName: "Ben 🏔️" }
+      responses:
+        "200":
+          description: The updated profile
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Profile" }
+              example: { userId: 511b25d0-40a1-705d-f49c-7e89f72c4924, displayName: Ana }
+        "400":
+          description: Malformed JSON, unknown field, or validation failure
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Error" }
+              examples:
+                blank:
+                  value: { error: "validation failed: displayName is required" }
+                tooLong:
+                  value: { error: "validation failed: displayName must be at most 50 characters" }
+                controlChars:
+                  value: { error: "validation failed: displayName must not contain control characters" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "413": { $ref: "#/components/responses/TooLarge" }
+        "429": { $ref: "#/components/responses/Throttled" }
+        "500": { $ref: "#/components/responses/InternalError" }
+
   # ---------- Members and invites ----------
   # People join a trip through its invite link. Any member can share the
   # link; only the trip's creator (the owner) can rotate it or remove
@@ -484,7 +551,7 @@ paths:
                   value:
                     members:
                       - userId: 511b25d0-40a1-705d-f49c-7e89f72c4924
-                        name: ana.silva
+                        name: Ana
                         role: owner
                         joinedAt: "2026-09-20T17:05:12Z"
                       - userId: 2c4d8e10-a0b1-70c2-9d3e-5f6a7b8c9d0e
@@ -500,7 +567,7 @@ paths:
                   value:
                     members:
                       - userId: 511b25d0-40a1-705d-f49c-7e89f72c4924
-                        name: ana.silva
+                        name: Ana
                         role: owner
                         joinedAt: "2026-09-20T17:05:12Z"
         "401": { $ref: "#/components/responses/Unauthorized" }
@@ -654,7 +721,7 @@ paths:
                       name: Lisbon long weekend
                       startDate: "2026-10-01"
                       endDate: "2026-10-06"
-                    ownerName: ana.silva
+                    ownerName: Ana
                     memberCount: 3
                     alreadyMember: false
                 alreadyMember:
@@ -666,7 +733,7 @@ paths:
                       name: Lisbon long weekend
                       startDate: "2026-10-01"
                       endDate: "2026-10-06"
-                    ownerName: ana.silva
+                    ownerName: Ana
                     memberCount: 3
                     alreadyMember: true
                 openEndedNoName:
@@ -910,6 +977,28 @@ components:
       properties:
         message: { type: string }
 
+    Profile:
+      type: object
+      additionalProperties: false
+      required: [userId, displayName]
+      properties:
+        userId: { type: string, description: "The caller's user id (Cognito sub)." }
+        displayName:
+          type: string
+          nullable: true
+          description: "What other members see; `null` until set."
+
+    UpdateProfileRequest:
+      type: object
+      additionalProperties: false
+      required: [displayName]
+      properties:
+        displayName:
+          type: string
+          minLength: 1
+          maxLength: 50
+          description: Trimmed by the server; must not be blank or contain control characters. At most 50 characters.
+
     Member:
       type: object
       additionalProperties: false
@@ -920,10 +1009,9 @@ components:
           type: string
           nullable: true
           description: |
-            Display name: the account's name if it has one, otherwise the part
-            of its email before the "@" (the full email is never shown to
-            other members). `null` when unknown; show something like
-            "Member".
+            The display name the member chose (`PATCH /me`); `null` if they
+            haven't set one yet (show "Member"). No part of anyone's email is
+            ever shown to other members.
         role:
           type: string
           enum: [owner, member]
@@ -969,7 +1057,7 @@ components:
         ownerName:
           type: string
           nullable: true
-          description: The owner's display name (see `Member.name`); `null` when unknown.
+          description: The owner's display name (see `Member.name`); `null` if they haven't set one.
         memberCount: { type: integer, minimum: 1 }
         alreadyMember: { type: boolean, description: "true when the caller is already in this trip (accepting is then a no-op)." }
 
