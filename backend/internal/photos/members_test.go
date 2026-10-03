@@ -117,7 +117,46 @@ func TestPutInviteAndRemoveMemberErrors(t *testing.T) {
 	}
 
 	notMember, _ := newFakeStore(t, canceled(`[{"Code":"ConditionalCheckFailed"},{"Code":"None"},{"Code":"None"}]`))
-	if err := notMember.RemoveMember(context.Background(), "trip-1", "user-2"); !errors.Is(err, ErrNotFound) {
+	if err := notMember.RemoveMember(context.Background(), "trip-1", "user-2", nil); !errors.Is(err, ErrNotFound) {
 		t.Fatalf("remove non-member: %v", err)
+	}
+}
+
+func TestRemoveMemberRotation(t *testing.T) {
+	rot := &Rotation{New: Invite{Code: "new", TripID: "trip-1", CreatedBy: "owner", CreatedAt: time.Unix(0, 0).UTC()}, Previous: "old"}
+
+	// Leaving: three items, no invite changes.
+	leave, f := newFakeStore(t, nil)
+	if err := leave.RemoveMember(context.Background(), "trip-1", "user-2", nil); err != nil {
+		t.Fatal(err)
+	}
+	raw, _ := json.Marshal(f.calls[0].Body)
+	if s := string(raw); strings.Contains(s, "INVITE#") || strings.Contains(s, "inviteCode") {
+		t.Fatalf("leave touched the invite: %s", s)
+	}
+
+	// Removal: the same transaction swaps the invite, guarded by the old code.
+	remove, f := newFakeStore(t, nil)
+	if err := remove.RemoveMember(context.Background(), "trip-1", "user-2", rot); err != nil {
+		t.Fatal(err)
+	}
+	raw, _ = json.Marshal(f.calls[0].Body)
+	s := string(raw)
+	for _, want := range []string{`"MEMBER#user-2"`, `"USER#user-2"`, `inviteCode = :new`, `inviteCode = :prev`, `"INVITE#old"`, `"INVITE#new"`} {
+		if !strings.Contains(s, want) {
+			t.Errorf("removal lacks %s: %s", want, s)
+		}
+	}
+	if n := len(f.calls[0].Body["TransactItems"].([]any)); n != 5 {
+		t.Errorf("removal has %d items, want 5", n)
+	}
+
+	changed, _ := newFakeStore(t, canceled(`[{"Code":"None"},{"Code":"None"},{"Code":"ConditionalCheckFailed","Item":{"inviteCode":{"S":"other"}}},{"Code":"None"},{"Code":"None"}]`))
+	if err := changed.RemoveMember(context.Background(), "trip-1", "user-2", rot); !errors.Is(err, ErrConflict) {
+		t.Fatalf("invite changed concurrently: %v", err)
+	}
+	gone, _ := newFakeStore(t, canceled(`[{"Code":"None"},{"Code":"None"},{"Code":"ConditionalCheckFailed"},{"Code":"None"},{"Code":"None"}]`))
+	if err := gone.RemoveMember(context.Background(), "trip-1", "user-2", rot); !errors.Is(err, ErrNotFound) {
+		t.Fatalf("trip gone: %v", err)
 	}
 }

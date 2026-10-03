@@ -9,8 +9,9 @@
 #   doesn't see it in GET /trips; wrong Content-Type and oversized uploads are
 #   rejected by S3; delete rules hold; members: A shares an invite link (the
 #   public landing page opens the app), B previews and joins with the code,
-#   sees A's photos, leaves, rejoins, is removed by A; the owner can't leave;
-#   a rotated code stops working.
+#   sees A's photos, leaves, rejoins, is removed by A (which rotates the
+#   invite, so B's old code stops working); the owner can't leave; a rotated
+#   code stops working.
 # Test trips (all their items and objects) and both users are deleted on exit. Passwords and
 # tokens are generated/held in a private temp dir and never printed.
 set -euo pipefail
@@ -350,6 +351,12 @@ member_del "$TMP/a.auth" "$SUB_B"
 api GET "$TMP/b.auth" "/trips/$A_TRIP/photos"
 [ "$STATUS" = 404 ] || fail "B after removal: photos -> $STATUS"
 pass "B rejoins; A removes B -> 204; B gets 404"
+accept "$TMP/b.auth" "$CODE"
+[ "$STATUS" = 404 ] || fail "B rejoining with the pre-removal code -> $STATUS"
+api POST "$TMP/a.auth" "/trips/$A_TRIP/invite"
+CODE="$(jq -r .code "$TMP/resp.json")"; INVITES+=("$CODE")
+[ "$STATUS" = 200 ] && [ "$CODE" != "${INVITES[0]}" ] || fail "removal didn't rotate the invite ($STATUS)"
+pass "removal rotated the invite: B's old code -> 404, A gets a new code"
 member_del "$TMP/a.auth" "$SUB_A"
 [ "$STATUS" = 409 ] || fail "A: leave own trip -> $STATUS"
 pass "A (owner): leave -> 409 $(jq -c . "$TMP/resp.json")"

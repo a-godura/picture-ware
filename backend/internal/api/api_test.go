@@ -27,6 +27,7 @@ type fakeStore struct {
 	memberInfo map[string]photos.Member // "tripID/userID", set by CreateTrip/AddMember
 	invites    map[string]photos.Invite // by code
 	raceInvite *photos.Invite           // PutInvite: someone else's invite lands first, once
+	removeRace *photos.Invite           // RemoveMember: someone rotates the invite first, once
 
 	err       error // returned by every method when set
 	memberErr error

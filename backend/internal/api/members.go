@@ -109,30 +109,49 @@ func (h *Handler) listMembers(ctx context.Context, tripID string) events.APIGate
 }
 
 // removeMember: your own id means leave; removing someone else is for the
-// owner only; the owner can't leave.
+// owner only, and also rotates the invite so they can't rejoin with it; the
+// owner can't leave.
 func (h *Handler) removeMember(ctx context.Context, tripID, callerID, targetID string) events.APIGatewayV2HTTPResponse {
 	if !photos.ValidID(targetID) {
 		return errorResponse(http.StatusNotFound, "member not found")
 	}
-	t, ok, resp := h.trip(ctx, tripID)
-	if !ok {
-		return resp
-	}
-	if targetID != callerID && callerID != t.CreatedBy {
-		return errorResponse(http.StatusForbidden, "only the trip's creator can remove members")
-	}
-	if targetID == t.CreatedBy {
-		return errorResponse(http.StatusConflict, "the trip's creator can't leave it")
-	}
-	err := h.Store.RemoveMember(ctx, tripID, targetID)
-	if errors.Is(err, photos.ErrNotFound) {
-		return errorResponse(http.StatusNotFound, "member not found")
-	}
-	if err != nil {
+	for range 3 {
+		t, ok, resp := h.trip(ctx, tripID)
+		if !ok {
+			return resp
+		}
+		if targetID != callerID && callerID != t.CreatedBy {
+			return errorResponse(http.StatusForbidden, "only the trip's creator can remove members")
+		}
+		if targetID == t.CreatedBy {
+			return errorResponse(http.StatusConflict, "the trip's creator can't leave it")
+		}
+		var rotate *photos.Rotation
+		if targetID != callerID && t.InviteCode != "" {
+			code, err := h.NewCode()
+			if err != nil {
+				slog.ErrorContext(ctx, "new invite code failed", "err", err)
+				return errorResponse(http.StatusInternalServerError, "internal error")
+			}
+			rotate = &photos.Rotation{
+				New:      photos.Invite{Code: code, TripID: tripID, CreatedBy: callerID, CreatedAt: h.Now().UTC()},
+				Previous: t.InviteCode,
+			}
+		}
+		err := h.Store.RemoveMember(ctx, tripID, targetID, rotate)
+		switch {
+		case err == nil:
+			return events.APIGatewayV2HTTPResponse{StatusCode: http.StatusNoContent}
+		case errors.Is(err, photos.ErrConflict):
+			continue // the invite changed meanwhile: re-read and rotate that one
+		case errors.Is(err, photos.ErrNotFound):
+			return errorResponse(http.StatusNotFound, "member not found")
+		}
 		slog.ErrorContext(ctx, "remove member failed", "tripId", tripID, "err", err)
 		return errorResponse(http.StatusInternalServerError, "internal error")
 	}
-	return events.APIGatewayV2HTTPResponse{StatusCode: http.StatusNoContent}
+	slog.ErrorContext(ctx, "invite kept changing", "tripId", tripID)
+	return errorResponse(http.StatusInternalServerError, "internal error")
 }
 
 // tripInvite returns the trip's active invite, creating it on first use.

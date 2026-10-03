@@ -35,7 +35,7 @@ type Store interface {
 	ListMembers(ctx context.Context, tripID string) ([]photos.Member, error)
 	GetMember(ctx context.Context, tripID, userID string) (photos.Member, error)
 	AddMember(ctx context.Context, t photos.Trip, m photos.Member, code string) error
-	RemoveMember(ctx context.Context, tripID, userID string) error
+	RemoveMember(ctx context.Context, tripID, userID string, rotate *photos.Rotation) error
 	GetInvite(ctx context.Context, code string) (photos.Invite, error)
 	PutInvite(ctx context.Context, inv photos.Invite, previous string) error
 }

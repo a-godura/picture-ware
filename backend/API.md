@@ -280,7 +280,7 @@ members per trip.
 | `GET /invites/{code}` | anyone signed in | `200 {code, trip:{id,name,startDate,endDate}, ownerName, memberCount, alreadyMember}`; `404 invite not found` for unknown/rotated codes |
 | `POST /invites/{code}/accept` | anyone signed in | `200` the trip (idempotent); `404` unknown/rotated; `409 trip is full` |
 | `GET /trips/{tripId}/members` | any member | `200 {members:[{userId, name, role: owner\|member, joinedAt}]}`, owner first |
-| `DELETE /trips/{tripId}/members/{userId}` | self, or owner | `204`; `403` non-owner removing someone else; `404 member not found`; `409` owner leaving |
+| `DELETE /trips/{tripId}/members/{userId}` | self, or owner | `204` (a removal also rotates the invite); `403` non-owner removing someone else; `404 member not found`; `409` owner leaving |
 | `GET /j/{code}` | **public** | `text/html` landing page with an "Open in picture-ware" button (`picture-ware://join/{code}`) |
 
 - Codes are 128 random bits, lowercase base32 (`[a-z2-7]{26}`). `url` is
@@ -293,8 +293,9 @@ members per trip.
   before the "@". It's looked up once (`AdminGetUser`) when someone creates
   or joins a trip, and stored on their member record. It's `null` when unknown,
   and the full email is never shown.
-- Removing someone doesn't rotate the link. Rotate it if they shouldn't be
-  able to rejoin.
+- When the owner removes someone, the invite is rotated in the same
+  transaction, so the removed person can't rejoin with the code they had.
+  Leaving doesn't rotate it.
 
 Items (single table): `TRIP#<id>/MEMBER#<sub>` `{userId, name, joinedAt}`,
 `INVITE#<code>/META` `{code, tripId, createdBy, createdAt}`, and on the

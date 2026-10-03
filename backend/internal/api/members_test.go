@@ -79,12 +79,30 @@ func (f *fakeStore) AddMember(_ context.Context, t photos.Trip, m photos.Member,
 	return nil
 }
 
-func (f *fakeStore) RemoveMember(_ context.Context, tripID, userID string) error {
+func (f *fakeStore) RemoveMember(_ context.Context, tripID, userID string, rotate *photos.Rotation) error {
 	if f.err != nil {
 		return f.err
 	}
 	if !f.members[tripID+"/"+userID] {
 		return photos.ErrNotFound
+	}
+	if r := f.removeRace; r != nil { // someone rotates just before us, once
+		f.removeRace = nil
+		t := f.trips[tripID]
+		delete(f.inv(), t.InviteCode)
+		f.inv()[r.Code] = *r
+		t.InviteCode = r.Code
+		f.trips[tripID] = t
+	}
+	if rotate != nil {
+		t := f.trips[tripID]
+		if t.InviteCode != rotate.Previous {
+			return photos.ErrConflict
+		}
+		delete(f.inv(), rotate.Previous)
+		f.inv()[rotate.New.Code] = rotate.New
+		t.InviteCode = rotate.New.Code
+		f.trips[tripID] = t
 	}
 	delete(f.members, tripID+"/"+userID)
 	delete(f.info(), tripID+"/"+userID)
@@ -307,6 +325,45 @@ func TestRemoveMemberRules(t *testing.T) {
 			}
 			expectStatus(t, hs.do(t, inTrip("GET /trips/{tripId}/photos", tt.target, tripID, nil)), http.StatusNotFound)
 		})
+	}
+}
+
+// The owner removing someone rotates the invite in the same step, so they
+// can't rejoin with the link they had; leaving doesn't.
+func TestRemoveRotatesInvite(t *testing.T) {
+	hs := newHarness(newStore())
+	trip := hs.createTrip(t)
+	inv := hs.invite(t, testUser, trip)
+	for _, u := range []string{otherUser, thirdUser} {
+		expectStatus(t, hs.do(t, atCode("POST /invites/{code}/accept", u, inv.Code)), http.StatusOK)
+	}
+
+	// Leaving keeps the link.
+	expectStatus(t, hs.do(t, inTrip("DELETE /trips/{tripId}/members/{userId}", thirdUser, trip, map[string]string{"userId": thirdUser})), http.StatusNoContent)
+	if got := hs.invite(t, testUser, trip); got.Code != inv.Code {
+		t.Fatalf("leaving rotated the invite to %q", got.Code)
+	}
+
+	// Removal rotates it.
+	expectStatus(t, hs.do(t, inTrip("DELETE /trips/{tripId}/members/{userId}", testUser, trip, map[string]string{"userId": otherUser})), http.StatusNoContent)
+	for _, route := range []string{"GET /invites/{code}", "POST /invites/{code}/accept"} {
+		expectStatus(t, hs.do(t, atCode(route, otherUser, inv.Code)), http.StatusNotFound)
+	}
+	if hs.store.members[trip+"/"+otherUser] {
+		t.Fatal("removed member rejoined with the old code")
+	}
+	fresh := hs.invite(t, testUser, trip)
+	if fresh.Code == inv.Code || fresh.CreatedBy != testUser {
+		t.Fatalf("invite after removal = %+v", fresh)
+	}
+	expectStatus(t, hs.do(t, atCode("POST /invites/{code}/accept", thirdUser, fresh.Code)), http.StatusOK)
+
+	// A concurrent rotation is retried against the new code.
+	theirs := photos.Invite{Code: strings.Repeat("z", 26), TripID: trip, CreatedBy: testUser, CreatedAt: fixedNow}
+	hs.store.removeRace = &theirs
+	expectStatus(t, hs.do(t, inTrip("DELETE /trips/{tripId}/members/{userId}", testUser, trip, map[string]string{"userId": thirdUser})), http.StatusNoContent)
+	if got := hs.store.trips[trip].InviteCode; got == theirs.Code || got == fresh.Code {
+		t.Fatalf("invite after racing removal = %q", got)
 	}
 }
 

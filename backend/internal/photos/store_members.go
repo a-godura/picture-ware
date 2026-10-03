@@ -148,30 +148,65 @@ func (s *DynamoStore) AddMember(ctx context.Context, t Trip, m Member, code stri
 	return nil
 }
 
+// Rotation replaces a trip's invite code New.Code for Previous (which must
+// still be the trip's active code) as part of another write.
+type Rotation struct {
+	New      Invite
+	Previous string
+}
+
 // RemoveMember takes userID out of the trip: their member record, their "my
-// trips" entry and one off the member count. Their photos stay. It returns
-// ErrNotFound if they aren't a member.
-func (s *DynamoStore) RemoveMember(ctx context.Context, tripID, userID string) error {
-	_, err := s.Client.TransactWriteItems(ctx, &dynamodb.TransactWriteItemsInput{
-		TransactItems: []types.TransactWriteItem{
-			{Delete: &types.Delete{
-				TableName: &s.Table, Key: key(tripPK(tripID), memberSK(userID)),
-				ConditionExpression: aws.String(attributeExists),
-			}},
-			{Delete: &types.Delete{TableName: &s.Table, Key: key(userPK(userID), tripSKPrefix+tripID)}},
-			{Update: &types.Update{
-				TableName:           &s.Table,
-				Key:                 key(tripPK(tripID), metaSK),
-				UpdateExpression:    aws.String("SET memberCount = if_not_exists(memberCount, :one) - :one"),
-				ConditionExpression: aws.String(attributeExists),
-				ExpressionAttributeValues: map[string]types.AttributeValue{
-					":one": &types.AttributeValueMemberN{Value: "1"},
-				},
-			}},
+// trips" entry and one off the member count. Their photos stay. With rotate,
+// the trip's invite is replaced in the same transaction, so the removed
+// person can't rejoin with the code they had. It returns ErrNotFound if they
+// aren't a member (or the trip is gone), and ErrConflict if the invite
+// changed concurrently (re-read and retry).
+func (s *DynamoStore) RemoveMember(ctx context.Context, tripID, userID string, rotate *Rotation) error {
+	update := &types.Update{
+		TableName:           &s.Table,
+		Key:                 key(tripPK(tripID), metaSK),
+		UpdateExpression:    aws.String("SET memberCount = if_not_exists(memberCount, :one) - :one"),
+		ConditionExpression: aws.String(attributeExists),
+		ExpressionAttributeValues: map[string]types.AttributeValue{
+			":one": &types.AttributeValueMemberN{Value: "1"},
 		},
-	})
-	if reasons, ok := cancellationReasons(err); ok && (failed(reasons, 0) || failed(reasons, 2)) {
-		return ErrNotFound
+		ReturnValuesOnConditionCheckFailure: types.ReturnValuesOnConditionCheckFailureAllOld,
+	}
+	ops := []types.TransactWriteItem{
+		{Delete: &types.Delete{
+			TableName: &s.Table, Key: key(tripPK(tripID), memberSK(userID)),
+			ConditionExpression: aws.String(attributeExists),
+		}},
+		{Delete: &types.Delete{TableName: &s.Table, Key: key(userPK(userID), tripSKPrefix+tripID)}},
+		{Update: update},
+	}
+	if rotate != nil {
+		it, err := item(invitePK(rotate.New.Code), metaSK, "invite", rotate.New)
+		if err != nil {
+			return err
+		}
+		update.UpdateExpression = aws.String(*update.UpdateExpression + ", inviteCode = :new")
+		update.ConditionExpression = aws.String(attributeExists + " AND inviteCode = :prev")
+		update.ExpressionAttributeValues[":new"] = &types.AttributeValueMemberS{Value: rotate.New.Code}
+		update.ExpressionAttributeValues[":prev"] = &types.AttributeValueMemberS{Value: rotate.Previous}
+		ops = append(ops,
+			types.TransactWriteItem{Delete: &types.Delete{TableName: &s.Table, Key: key(invitePK(rotate.Previous), metaSK)}},
+			types.TransactWriteItem{Put: &types.Put{TableName: &s.Table, Item: it, ConditionExpression: aws.String(attributeAbsent)}},
+		)
+	}
+	_, err := s.Client.TransactWriteItems(ctx, &dynamodb.TransactWriteItemsInput{TransactItems: ops})
+	if reasons, ok := cancellationReasons(err); ok {
+		switch {
+		case failed(reasons, 0):
+			return ErrNotFound
+		case failed(reasons, 2):
+			if reasons[2].Item == nil {
+				return ErrNotFound
+			}
+			return ErrConflict // the invite changed since the trip was read
+		case failed(reasons, 4): // 128-bit code collision: practically impossible
+			return ErrConflict
+		}
 	}
 	if err != nil {
 		return fmt.Errorf("remove member: %w", err)
