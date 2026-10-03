@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"strings"
 	"testing"
 	"time"
@@ -29,17 +30,74 @@ func TestInviteCodes(t *testing.T) {
 	}
 }
 
-func TestDisplayName(t *testing.T) {
-	for _, tt := range []struct{ name, email, want string }{
-		{"Ana Silva", "ana@example.com", "Ana Silva"},
-		{"  ", "ana.silva@example.com", "ana.silva"},
-		{"", "ana.silva@example.com", "ana.silva"},
-		{"", "", ""},
-		{"", "not-an-email", ""},
+func TestUpdateProfileValidate(t *testing.T) {
+	ptr := func(s string) *string { return &s }
+	for _, tt := range []struct {
+		in      *string
+		want    string
+		wantErr string
+	}{
+		{ptr("  Ana Silva "), "Ana Silva", ""},
+		{ptr(strings.Repeat("é", 50)), strings.Repeat("é", 50), ""},
+		{ptr("Ben 🏔️"), "Ben 🏔️", ""},
+		{nil, "", "required"},
+		{ptr(" \t "), "", "required"},
+		{ptr(strings.Repeat("é", 51)), "", "at most 50"},
+		{ptr("a\u0000b"), "", "control"},
+		{ptr("two\nlines"), "", "control"},
 	} {
-		if got := DisplayName(tt.name, tt.email); got != tt.want {
-			t.Errorf("DisplayName(%q, %q) = %q, want %q", tt.name, tt.email, got, tt.want)
+		got, err := UpdateProfileRequest{DisplayName: tt.in}.Validate()
+		if tt.wantErr != "" {
+			if err == nil || !errors.Is(err, ErrValidation) || !strings.Contains(err.Error(), tt.wantErr) {
+				t.Errorf("Validate(%v) err = %v, want %q", tt.in, err, tt.wantErr)
+			}
+			continue
 		}
+		if err != nil || got != tt.want {
+			t.Errorf("Validate(%q) = %q, %v", *tt.in, got, err)
+		}
+	}
+}
+
+func TestDisplayNamesBatches(t *testing.T) {
+	var ids []string
+	for i := range 130 {
+		ids = append(ids, fmt.Sprintf("user-%d", i))
+	}
+	// First call: names for user-0 and user-1, user-2 left unprocessed and
+	// returned by the retry; user-3 has a profile without a name.
+	store, f := newFakeStore(t, func(_ string, call int) (int, string) {
+		switch call {
+		case 0:
+			return 200, `{"Responses":{"AppTable":[{"userId":{"S":"user-0"},"displayName":{"S":"Ana"}},` +
+				`{"userId":{"S":"user-1"},"displayName":{"S":"Ben"}},{"userId":{"S":"user-3"}}]},` +
+				`"UnprocessedKeys":{"AppTable":{"Keys":[{"PK":{"S":"USER#user-2"},"SK":{"S":"PROFILE"}}]}}}`
+		case 1:
+			return 200, `{"Responses":{"AppTable":[{"userId":{"S":"user-2"},"displayName":{"S":"Cy"}}]}}`
+		}
+		return 200, `{"Responses":{"AppTable":[]}}`
+	})
+	got, err := store.DisplayNames(context.Background(), ids)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(got) != 3 || got["user-0"] != "Ana" || got["user-1"] != "Ben" || got["user-2"] != "Cy" {
+		t.Fatalf("names = %v", got)
+	}
+	if len(f.calls) != 3 { // 100 keys, the retry, then the remaining 30
+		t.Fatalf("calls = %d", len(f.calls))
+	}
+	keys := f.calls[0].Body["RequestItems"].(map[string]any)["AppTable"].(map[string]any)["Keys"].([]any)
+	if len(keys) != 100 || str(keys[0], "SK") != "PROFILE" || str(keys[0], "PK") != "USER#user-0" {
+		t.Fatalf("first batch = %d keys, %v", len(keys), keys[0])
+	}
+}
+
+func TestGetProfileMissing(t *testing.T) {
+	store, _ := newFakeStore(t, func(string, int) (int, string) { return 200, `{}` })
+	p, err := store.GetProfile(context.Background(), "user-9")
+	if err != nil || p != (Profile{UserID: "user-9"}) {
+		t.Fatalf("GetProfile = %+v, %v", p, err)
 	}
 }
 
@@ -57,7 +115,7 @@ func canceled(reasons string) func(string, int) (int, string) {
 var inviteTrip = func() Trip { t := testTrip; t.InviteCode, t.MemberCount = "should-not-be-copied", 7; return t }()
 
 func TestAddMemberErrors(t *testing.T) {
-	m := Member{UserID: "user-2", Name: "Ben", JoinedAt: time.Unix(0, 0).UTC()}
+	m := Member{UserID: "user-2", JoinedAt: time.Unix(0, 0).UTC()}
 	tests := []struct {
 		name string
 		fake func(string, int) (int, string)

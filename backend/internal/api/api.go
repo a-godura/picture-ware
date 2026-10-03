@@ -33,16 +33,15 @@ type Store interface {
 	DeletePhoto(ctx context.Context, p photos.Photo) error
 
 	ListMembers(ctx context.Context, tripID string) ([]photos.Member, error)
-	GetMember(ctx context.Context, tripID, userID string) (photos.Member, error)
 	AddMember(ctx context.Context, t photos.Trip, m photos.Member, code string) error
 	RemoveMember(ctx context.Context, tripID, userID string, rotate *photos.Rotation) error
 	GetInvite(ctx context.Context, code string) (photos.Invite, error)
 	PutInvite(ctx context.Context, inv photos.Invite, previous string) error
-}
 
-// Directory looks up the display name other members see for a user.
-type Directory interface {
-	DisplayName(ctx context.Context, userID string) (string, error)
+	GetProfile(ctx context.Context, userID string) (photos.Profile, error)
+	PutProfile(ctx context.Context, p photos.Profile) error
+	// DisplayNames maps user ids to display names; users without one are absent.
+	DisplayNames(ctx context.Context, userIDs []string) (map[string]string, error)
 }
 
 // Objects deletes stored photo files.
@@ -61,7 +60,6 @@ type Handler struct {
 	Store     Store
 	Presigner Presigner
 	Objects   Objects
-	Directory Directory
 	NewID     func() string
 	NewCode   func() (string, error) // invite codes
 	Now       func() time.Time
@@ -141,7 +139,7 @@ func (h *Handler) Handle(ctx context.Context, req events.APIGatewayV2HTTPRequest
 	case "GET /j/{code}":
 		// Public (no JWT): the landing page an invite link opens.
 		return landingPage(req.PathParameters["code"]), nil
-	case "GET /trips", "POST /trips", "GET /trips/{tripId}",
+	case "GET /me", "PATCH /me", "GET /trips", "POST /trips", "GET /trips/{tripId}",
 		"GET /trips/{tripId}/photos", "POST /trips/{tripId}/photos", "DELETE /trips/{tripId}/photos/{photoId}",
 		"GET /trips/{tripId}/members", "DELETE /trips/{tripId}/members/{userId}",
 		"POST /trips/{tripId}/invite", "POST /trips/{tripId}/invite/rotate",
@@ -159,6 +157,10 @@ func (h *Handler) Handle(ctx context.Context, req events.APIGatewayV2HTTPRequest
 		return h.listTrips(ctx, userID), nil
 	case "POST /trips":
 		return h.createTrip(ctx, userID, req), nil
+	case "GET /me":
+		return h.getMe(ctx, userID), nil
+	case "PATCH /me":
+		return h.updateMe(ctx, userID, req), nil
 	case "GET /invites/{code}":
 		return h.previewInvite(ctx, userID, req.PathParameters["code"]), nil
 	case "POST /invites/{code}/accept":
@@ -238,7 +240,7 @@ func (h *Handler) createTrip(ctx context.Context, userID string, req events.APIG
 		ID: h.NewID(), Name: in.Name, StartDate: in.StartDate, EndDate: in.EndDate,
 		CreatedBy: userID, CreatedAt: h.Now().UTC(),
 	}
-	owner := photos.Member{UserID: userID, Name: h.displayName(ctx, userID), JoinedAt: t.CreatedAt}
+	owner := photos.Member{UserID: userID, JoinedAt: t.CreatedAt}
 	if err := h.Store.CreateTrip(ctx, t, owner); err != nil {
 		slog.ErrorContext(ctx, "create trip failed", "err", err)
 		return errorResponse(http.StatusInternalServerError, "internal error")

@@ -8,7 +8,8 @@
 #   same bytes; B (not a member) gets 404 for the trip and its photos and
 #   doesn't see it in GET /trips; wrong Content-Type and oversized uploads are
 #   rejected by S3; delete rules hold; members: A shares an invite link (the
-#   public landing page opens the app), B previews and joins with the code,
+#   public landing page opens the app), display names via PATCH /me, B
+#   previews and joins with the code,
 #   sees A's photos, leaves, rejoins, is removed by A (which rotates the
 #   invite, so B's old code stops working); the owner can't leave; a rotated
 #   code stops working.
@@ -58,6 +59,7 @@ cleanup() {
     "${AWS[@]}" s3 rm "s3://$BUCKET/trips/$trip/" --recursive >/dev/null 2>&1 || true
   done
   for code in "${INVITES[@]+"${INVITES[@]}"}"; do delete_key "INVITE#$code" META; done
+  for sub in "${SUBS[@]+"${SUBS[@]}"}"; do delete_key "USER#$sub" PROFILE; done
   for u in "${USERS[@]+"${USERS[@]}"}"; do
     "${AWS[@]}" cognito-idp admin-delete-user --user-pool-id "$POOL" --username "$u" >/dev/null || true
   done
@@ -306,9 +308,20 @@ pass "GET /j/not-a-code -> 404"
 
 api GET "$TMP/b.auth" "/invites/$CODE"
 [ "$STATUS" = 200 ] || fail "B: preview -> $STATUS $(cat "$TMP/resp.json")"
-jq -e --arg t "$A_TRIP" '.trip.id == $t and .memberCount == 1 and .alreadyMember == false and (.ownerName | startswith("pw-smoke-a-"))' \
+jq -e --arg t "$A_TRIP" '.trip.id == $t and .memberCount == 1 and .alreadyMember == false and .ownerName == null' \
   "$TMP/resp.json" >/dev/null || fail "B: preview body $(cat "$TMP/resp.json")"
-pass "B: GET /invites/{code} -> 200 $(jq -c 'del(.code)' "$TMP/resp.json")"
+pass "B: GET /invites/{code} -> 200, ownerName null (A hasn't chosen a name) $(jq -c 'del(.code)' "$TMP/resp.json")"
+
+# Display names: chosen via PATCH /me, never derived from email.
+api GET "$TMP/a.auth" /me
+[ "$STATUS" = 200 ] && jq -e --arg s "$SUB_A" '.userId == $s and .displayName == null' "$TMP/resp.json" >/dev/null || fail "A: GET /me -> $STATUS $(cat "$TMP/resp.json")"
+api PATCH "$TMP/a.auth" /me '{"displayName":"   "}'
+[ "$STATUS" = 400 ] || fail "A: blank displayName -> $STATUS"
+api PATCH "$TMP/a.auth" /me '{"displayName":"  Smoke A  "}'
+[ "$STATUS" = 200 ] && jq -e '.displayName == "Smoke A"' "$TMP/resp.json" >/dev/null || fail "A: PATCH /me -> $STATUS $(cat "$TMP/resp.json")"
+api GET "$TMP/b.auth" "/invites/$CODE"
+jq -e '.ownerName == "Smoke A"' "$TMP/resp.json" >/dev/null || fail "preview ownerName after naming: $(cat "$TMP/resp.json")"
+pass "A: GET /me -> null name; PATCH /me blank -> 400, \"  Smoke A  \" -> 200 trimmed; preview shows it"
 
 accept() { api POST "$1" "/invites/$2/accept"; }
 accept "$TMP/b.auth" "$CODE"
@@ -325,8 +338,12 @@ api GET "$TMP/b.auth" "/trips/$A_TRIP/members"
 [ "$STATUS" = 200 ] || fail "B: members -> $STATUS"
 jq -e --arg a "$SUB_A" --arg b "$SUB_B" '[.members[] | .userId + ":" + .role] == [$a + ":owner", $b + ":member"]' \
   "$TMP/resp.json" >/dev/null || fail "members $(cat "$TMP/resp.json")"
-jq -e 'all(.members[]; (.name // "") | contains("@") | not)' "$TMP/resp.json" >/dev/null || fail "members list shows an email"
-pass "B: GET /trips/{id}/members -> owner A, member B, no emails"
+jq -e '[.members[].name] == ["Smoke A", null]' "$TMP/resp.json" >/dev/null || fail "member names $(cat "$TMP/resp.json")"
+api PATCH "$TMP/b.auth" /me '{"displayName":"Smoke B"}'
+[ "$STATUS" = 200 ] || fail "B: PATCH /me -> $STATUS"
+api GET "$TMP/a.auth" "/trips/$A_TRIP/members"
+jq -e '[.members[].name] == ["Smoke A", "Smoke B"]' "$TMP/resp.json" >/dev/null || fail "member names after B named: $(cat "$TMP/resp.json")"
+pass "GET /trips/{id}/members -> owner A, member B; names are the chosen ones (null until set)"
 
 api POST "$TMP/b.auth" "/trips/$A_TRIP/invite"
 [ "$STATUS" = 200 ] && [ "$(jq -r .code "$TMP/resp.json")" = "$CODE" ] || fail "B: POST invite -> $STATUS"

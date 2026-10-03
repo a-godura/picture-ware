@@ -7,18 +7,50 @@ import (
 	"fmt"
 	"strings"
 	"time"
+	"unicode"
+	"unicode/utf8"
 )
 
 // MaxMembers is the most people one trip can have.
 const MaxMembers = 50
 
-// Member is one person in a trip. Name is a display name captured when they
-// joined ("" when unknown); JoinedAt is zero for trips created before
-// members were recorded with it.
+// Member is one person in a trip. JoinedAt is zero for trips created before
+// members were recorded with it. Names aren't stored here: they're the
+// members' profiles' display names, resolved when read.
 type Member struct {
 	UserID   string    `dynamodbav:"userId"`
-	Name     string    `dynamodbav:"name,omitempty"`
 	JoinedAt time.Time `dynamodbav:"joinedAt"`
+}
+
+// Profile is a user's own settings. DisplayName is what other members see
+// ("" until the user chooses one); emails are never shown.
+type Profile struct {
+	UserID      string `dynamodbav:"userId"`
+	DisplayName string `dynamodbav:"displayName,omitempty"`
+}
+
+const maxDisplayNameLen = 50
+
+// UpdateProfileRequest is the body of PATCH /me.
+type UpdateProfileRequest struct {
+	DisplayName *string `json:"displayName"`
+}
+
+// Validate returns the trimmed display name. Errors wrap ErrValidation.
+func (r UpdateProfileRequest) Validate() (string, error) {
+	if r.DisplayName == nil {
+		return "", fmt.Errorf("%w: displayName is required", ErrValidation)
+	}
+	name := strings.TrimSpace(*r.DisplayName)
+	switch {
+	case name == "":
+		return "", fmt.Errorf("%w: displayName is required", ErrValidation)
+	case utf8.RuneCountInString(name) > maxDisplayNameLen:
+		return "", fmt.Errorf("%w: displayName must be at most %d characters", ErrValidation, maxDisplayNameLen)
+	case strings.IndexFunc(name, unicode.IsControl) >= 0:
+		return "", fmt.Errorf("%w: displayName must not contain control characters", ErrValidation)
+	}
+	return name, nil
 }
 
 // Invite lets anyone signed in who has Code join TripID. A trip has at most
@@ -66,17 +98,4 @@ func ValidInviteCode(s string) bool {
 		}
 	}
 	return true
-}
-
-// DisplayName picks what other members see for a user: their name if set,
-// otherwise the part of their email before the "@" (never the full email).
-func DisplayName(name, email string) string {
-	if n := strings.TrimSpace(name); n != "" {
-		return n
-	}
-	local, _, ok := strings.Cut(email, "@")
-	if !ok {
-		return ""
-	}
-	return local
 }

@@ -265,6 +265,14 @@ part-way leaves the photo listed and the client can simply retry.
 - Deleting a `pending` photo (upload never finished) also works.
 - Errors: `401` (see Authentication), `403`, `404`, `429`, `500`.
 
+## `GET /me`, `PATCH /me`
+
+The caller's profile: `{"userId": "<sub>", "displayName": "Ana"}`, with
+`displayName: null` until set. `PATCH /me` takes `{"displayName": "..."}`.
+The name is trimmed and must be 1–50 characters with no control characters
+(otherwise `400`). The response is `200` with the updated profile. This is
+what other trip members see.
+
 ## Members and invite links
 
 People join a trip through its **invite link**. Any member can get it and
@@ -289,15 +297,19 @@ members per trip.
 - The landing page shows no trip data and doesn't look the code up (no
   database read). Malformed codes get a `404` page. It's throttled like every
   other route, with `no-store`, `no-referrer`, `noindex` and a strict CSP.
-- `name` / `ownerName` is the Cognito `name` attribute, or the email
-  before the "@". It's looked up once (`AdminGetUser`) when someone creates
-  or joins a trip, and stored on their member record. It's `null` when unknown,
-  and the full email is never shown.
+- `name` / `ownerName` is the display name the person chose with
+  `PATCH /me`, or `null` if they haven't chosen one yet (the app shows
+  "Member"). No part of anyone's email is ever shown. Names are resolved
+  when they're read: one `BatchGetItem` of the members' `USER#<sub>/PROFILE`
+  items per members list (at most 50 keys, about 25 RRU), and one `GetItem`
+  per preview. So a new name shows up everywhere at once, and renaming
+  costs one write rather than one per trip.
 - When the owner removes someone, the invite is rotated in the same
   transaction, so the removed person can't rejoin with the code they had.
   Leaving doesn't rotate it.
 
-Items (single table): `TRIP#<id>/MEMBER#<sub>` `{userId, name, joinedAt}`,
+Items (single table): `TRIP#<id>/MEMBER#<sub>` `{userId, joinedAt}`,
+`USER#<sub>/PROFILE` `{userId, displayName}`,
 `INVITE#<code>/META` `{code, tripId, createdBy, createdAt}`, and on the
 trip's `META` item `inviteCode` (active code) and `memberCount`. Joining and
 leaving are transactions over the member record, the user's `USER#<sub>/TRIP#<id>`

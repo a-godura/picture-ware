@@ -117,7 +117,7 @@ func TestItemShapeAndRoundTrip(t *testing.T) {
 
 func TestCreateTripWritesThreeItemsAtomically(t *testing.T) {
 	s, f := newFakeStore(t, nil)
-	owner := Member{UserID: "user-1", Name: "ana.silva", JoinedAt: testCreated}
+	owner := Member{UserID: "user-1", JoinedAt: testCreated}
 	if err := s.CreateTrip(context.Background(), testTrip, owner); err != nil {
 		t.Fatal(err)
 	}
@@ -143,7 +143,7 @@ func TestCreateTripWritesThreeItemsAtomically(t *testing.T) {
 	if n, _ := meta["memberCount"].(map[string]any); n["N"] != "1" {
 		t.Errorf("trip's memberCount = %v, want 1", meta["memberCount"])
 	}
-	if str(member, "name") != "ana.silva" || str(member, "joinedAt") == "" {
+	if str(member, "userId") != "user-1" || str(member, "joinedAt") == "" {
 		t.Errorf("owner member item = %v", member)
 	}
 	if _, ok := mine["memberCount"]; ok {

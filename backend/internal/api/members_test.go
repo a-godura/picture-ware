@@ -45,20 +45,6 @@ func (f *fakeStore) ListMembers(_ context.Context, tripID string) ([]photos.Memb
 	return out, f.err
 }
 
-func (f *fakeStore) GetMember(_ context.Context, tripID, userID string) (photos.Member, error) {
-	if f.err != nil {
-		return photos.Member{}, f.err
-	}
-	if !f.members[tripID+"/"+userID] {
-		return photos.Member{}, photos.ErrNotFound
-	}
-	m, ok := f.info()[tripID+"/"+userID]
-	if !ok {
-		m = photos.Member{UserID: userID}
-	}
-	return m, nil
-}
-
 func (f *fakeStore) AddMember(_ context.Context, t photos.Trip, m photos.Member, code string) error {
 	if f.err != nil {
 		return f.err
@@ -147,13 +133,35 @@ func (f *fakeStore) PutInvite(_ context.Context, inv photos.Invite, previous str
 	return nil
 }
 
-type fakeDirectory struct {
-	names map[string]string
-	err   error
+func (f *fakeStore) GetProfile(_ context.Context, userID string) (photos.Profile, error) {
+	if f.err != nil {
+		return photos.Profile{}, f.err
+	}
+	if p, ok := f.profiles[userID]; ok {
+		return p, nil
+	}
+	return photos.Profile{UserID: userID}, nil
 }
 
-func (d *fakeDirectory) DisplayName(_ context.Context, userID string) (string, error) {
-	return d.names[userID], d.err
+func (f *fakeStore) PutProfile(_ context.Context, p photos.Profile) error {
+	if f.err != nil {
+		return f.err
+	}
+	if f.profiles == nil {
+		f.profiles = map[string]photos.Profile{}
+	}
+	f.profiles[p.UserID] = p
+	return nil
+}
+
+func (f *fakeStore) DisplayNames(_ context.Context, userIDs []string) (map[string]string, error) {
+	out := map[string]string{}
+	for _, id := range userIDs {
+		if p := f.profiles[id]; p.DisplayName != "" {
+			out[id] = p.DisplayName
+		}
+	}
+	return out, f.err
 }
 
 // newCode hands out distinct, well-formed invite codes.
@@ -206,6 +214,7 @@ func (hs *harness) invite(t *testing.T, sub, trip string) InviteView {
 // rotate.
 func TestInviteFlow(t *testing.T) {
 	hs := newHarness(newStore())
+	hs.setName(t, testUser, "Ana")
 	trip := hs.createTrip(t)
 	hs.store.withPhoto(photos.Photo{TripID: trip, ID: "p1", UploaderID: testUser, Status: photos.StatusReady, CreatedAt: fixedNow})
 
@@ -225,7 +234,7 @@ func TestInviteFlow(t *testing.T) {
 	resp := hs.do(t, atCode("GET /invites/{code}", otherUser, inv.Code))
 	expectStatus(t, resp, http.StatusOK)
 	p := decode[InvitePreview](t, resp)
-	if p.Trip.ID != trip || p.Trip.Name != "Lisbon" || p.Trip.EndDate != nil || p.OwnerName == nil || *p.OwnerName != "ana.silva" ||
+	if p.Trip.ID != trip || p.Trip.Name != "Lisbon" || p.Trip.EndDate != nil || p.OwnerName == nil || *p.OwnerName != "Ana" ||
 		p.MemberCount != 1 || p.AlreadyMember {
 		t.Fatalf("preview = %s", resp.Body)
 	}
@@ -252,12 +261,13 @@ func TestInviteFlow(t *testing.T) {
 	}
 
 	// Members: owner first. B can share the same invite.
-	hs.store.info()[trip+"/"+otherUser] = photos.Member{UserID: otherUser, Name: "Ben", JoinedAt: fixedNow.Add(time.Hour)}
+	hs.store.info()[trip+"/"+otherUser] = photos.Member{UserID: otherUser, JoinedAt: fixedNow.Add(time.Hour)}
+	hs.setName(t, otherUser, "  Ben 🏔️ ")
 	resp = hs.do(t, inTrip("GET /trips/{tripId}/members", otherUser, trip, nil))
 	expectStatus(t, resp, http.StatusOK)
 	ml := decode[MemberList](t, resp)
 	if len(ml.Members) != 2 || ml.Members[0].UserID != testUser || ml.Members[0].Role != RoleOwner ||
-		ml.Members[1].UserID != otherUser || ml.Members[1].Role != RoleMember || *ml.Members[1].Name != "Ben" {
+		ml.Members[1].UserID != otherUser || ml.Members[1].Role != RoleMember || *ml.Members[1].Name != "Ben 🏔️" {
 		t.Fatalf("members = %s", resp.Body)
 	}
 	if got := hs.invite(t, otherUser, trip); got.Code != inv.Code {
@@ -412,17 +422,72 @@ func TestInviteOutsiderAndErrors(t *testing.T) {
 	}
 }
 
-// A failed name lookup doesn't stop anyone joining; they just have no name.
-func TestJoinWithoutDisplayName(t *testing.T) {
+// Members who haven't chosen a display name are listed with name null; a
+// name chosen later shows up at once, and never anything email-derived.
+func TestMemberNames(t *testing.T) {
 	hs := newHarness(newStore())
 	trip := hs.createTrip(t)
 	inv := hs.invite(t, testUser, trip)
-	hs.dir.err = errors.New("cognito down")
+	p := decode[InvitePreview](t, hs.do(t, atCode("GET /invites/{code}", otherUser, inv.Code)))
+	if p.OwnerName != nil {
+		t.Fatalf("ownerName = %q before the owner chose one", *p.OwnerName)
+	}
 	expectStatus(t, hs.do(t, atCode("POST /invites/{code}/accept", otherUser, inv.Code)), http.StatusOK)
 	ml := decode[MemberList](t, hs.do(t, inTrip("GET /trips/{tripId}/members", testUser, trip, nil)))
-	if len(ml.Members) != 2 || ml.Members[1].Name != nil || *ml.Members[0].Name != "ana.silva" {
+	if len(ml.Members) != 2 || ml.Members[0].Name != nil || ml.Members[1].Name != nil {
 		t.Fatalf("members = %+v", ml)
 	}
+	hs.setName(t, otherUser, "Ben")
+	ml = decode[MemberList](t, hs.do(t, inTrip("GET /trips/{tripId}/members", testUser, trip, nil)))
+	if ml.Members[1].Name == nil || *ml.Members[1].Name != "Ben" {
+		t.Fatalf("members after naming = %+v", ml)
+	}
+}
+
+func TestMe(t *testing.T) {
+	hs := newHarness(newStore())
+	resp := hs.do(t, authed("GET /me", testUser))
+	expectStatus(t, resp, http.StatusOK)
+	if got := decode[ProfileView](t, resp); got.UserID != testUser || got.DisplayName != nil {
+		t.Fatalf("new user's profile = %s", resp.Body)
+	}
+	for _, tt := range []struct {
+		body    string
+		want    int
+		wantErr string
+	}{
+		{`{"displayName":""}`, http.StatusBadRequest, "required"},
+		{`{"displayName":"   "}`, http.StatusBadRequest, "required"},
+		{`{}`, http.StatusBadRequest, "required"},
+		{`{"displayName":"` + strings.Repeat("é", 51) + `"}`, http.StatusBadRequest, "at most 50"},
+		{`{"displayName":"a\nb"}`, http.StatusBadRequest, "control"},
+		{`{"displayName":"Ana","email":"x"}`, http.StatusBadRequest, ""},
+		{`{"displayName":"` + strings.Repeat("é", 50) + `"}`, http.StatusOK, ""},
+		{`{"displayName":"  Ana  "}`, http.StatusOK, ""},
+	} {
+		req := authed("PATCH /me", testUser)
+		req.Body = tt.body
+		resp := hs.do(t, req)
+		expectStatus(t, resp, tt.want)
+		if tt.wantErr != "" && !strings.Contains(errMsg(t, resp.Body), tt.wantErr) {
+			t.Fatalf("%s: error %s", tt.body, resp.Body)
+		}
+	}
+	resp = hs.do(t, authed("GET /me", testUser))
+	if got := decode[ProfileView](t, resp); got.DisplayName == nil || *got.DisplayName != "Ana" {
+		t.Fatalf("profile after PATCH = %s", resp.Body)
+	}
+	hs.store.err = errors.New("boom")
+	expectStatus(t, hs.do(t, authed("GET /me", testUser)), http.StatusInternalServerError)
+}
+
+// setName sets sub's display name through PATCH /me.
+func (hs *harness) setName(t *testing.T, sub, name string) {
+	t.Helper()
+	req := authed("PATCH /me", sub)
+	b, _ := json.Marshal(map[string]string{"displayName": name})
+	req.Body = string(b)
+	expectStatus(t, hs.do(t, req), http.StatusOK)
 }
 
 // Someone else creating the trip's first invite at the same moment: both

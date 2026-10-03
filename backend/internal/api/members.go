@@ -62,20 +62,6 @@ type InvitePreview struct {
 // AppScheme is the custom URL scheme the iOS app registers.
 const AppScheme = "picture-ware"
 
-// displayName looks up userID's display name, best effort: members are
-// still added when the lookup fails, just without a name.
-func (h *Handler) displayName(ctx context.Context, userID string) string {
-	if h.Directory == nil {
-		return ""
-	}
-	name, err := h.Directory.DisplayName(ctx, userID)
-	if err != nil {
-		slog.WarnContext(ctx, "display name lookup failed", "userId", userID, "err", err)
-		return ""
-	}
-	return name
-}
-
 func (h *Handler) listMembers(ctx context.Context, tripID string) events.APIGatewayV2HTTPResponse {
 	t, ok, resp := h.trip(ctx, tripID)
 	if !ok {
@@ -86,9 +72,20 @@ func (h *Handler) listMembers(ctx context.Context, tripID string) events.APIGate
 		slog.ErrorContext(ctx, "list members failed", "tripId", tripID, "err", err)
 		return errorResponse(http.StatusInternalServerError, "internal error")
 	}
+	// Names are resolved when read (one batch read of the members'
+	// profiles), so a new display name shows up everywhere at once.
+	ids := make([]string, 0, len(members))
+	for _, m := range members {
+		ids = append(ids, m.UserID)
+	}
+	names, err := h.Store.DisplayNames(ctx, ids)
+	if err != nil {
+		slog.ErrorContext(ctx, "display names failed", "tripId", tripID, "err", err)
+		return errorResponse(http.StatusInternalServerError, "internal error")
+	}
 	out := MemberList{Members: make([]MemberView, 0, len(members))}
 	for _, m := range members {
-		v := MemberView{UserID: m.UserID, Name: optional(m.Name), Role: RoleMember, JoinedAt: m.JoinedAt}
+		v := MemberView{UserID: m.UserID, Name: optional(names[m.UserID]), Role: RoleMember, JoinedAt: m.JoinedAt}
 		if m.UserID == t.CreatedBy {
 			v.Role = RoleOwner
 			if v.JoinedAt.IsZero() {
@@ -260,20 +257,16 @@ func (h *Handler) previewInvite(ctx context.Context, userID, code string) events
 		slog.ErrorContext(ctx, "membership check failed", "tripId", t.ID, "err", err)
 		return errorResponse(http.StatusInternalServerError, "internal error")
 	}
-	var ownerName *string
-	owner, err := h.Store.GetMember(ctx, t.ID, t.CreatedBy)
-	switch {
-	case err == nil:
-		ownerName = optional(owner.Name)
-	case !errors.Is(err, photos.ErrNotFound):
-		slog.ErrorContext(ctx, "get owner failed", "tripId", t.ID, "err", err)
+	owner, err := h.Store.GetProfile(ctx, t.CreatedBy)
+	if err != nil {
+		slog.ErrorContext(ctx, "get owner profile failed", "tripId", t.ID, "err", err)
 		return errorResponse(http.StatusInternalServerError, "internal error")
 	}
 	v := tripView(t)
 	return jsonResponse(http.StatusOK, InvitePreview{
 		Code:          code,
 		Trip:          TripSummary{ID: v.ID, Name: v.Name, StartDate: v.StartDate, EndDate: v.EndDate},
-		OwnerName:     ownerName,
+		OwnerName:     optional(owner.DisplayName),
 		MemberCount:   t.Members(),
 		AlreadyMember: member,
 	})
@@ -292,7 +285,7 @@ func (h *Handler) acceptInvite(ctx context.Context, userID, code string) events.
 	if member {
 		return jsonResponse(http.StatusOK, tripView(t))
 	}
-	m := photos.Member{UserID: userID, Name: h.displayName(ctx, userID), JoinedAt: h.Now().UTC()}
+	m := photos.Member{UserID: userID, JoinedAt: h.Now().UTC()}
 	err = h.Store.AddMember(ctx, t, m, code)
 	switch {
 	case err == nil, errors.Is(err, photos.ErrAlreadyMember):

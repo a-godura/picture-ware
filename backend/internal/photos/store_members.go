@@ -30,13 +30,6 @@ func (s *DynamoStore) ListMembers(ctx context.Context, tripID string) ([]Member,
 	return out, err
 }
 
-// GetMember returns one member, or ErrNotFound.
-func (s *DynamoStore) GetMember(ctx context.Context, tripID, userID string) (Member, error) {
-	var m Member
-	err := s.get(ctx, tripPK(tripID), memberSK(userID), &m)
-	return m, err
-}
-
 // GetInvite returns the invite with this code, or ErrNotFound (unknown or
 // rotated away).
 func (s *DynamoStore) GetInvite(ctx context.Context, code string) (Invite, error) {

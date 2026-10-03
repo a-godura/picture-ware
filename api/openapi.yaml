@@ -465,7 +465,6 @@ paths:
   /me:
     get:
       operationId: getMe
-      x-planned: true
       summary: Get the caller's profile
       description: "`displayName` is `null` until the user sets one (the app asks on first run)."
       responses:
@@ -485,7 +484,6 @@ paths:
         "500": { $ref: "#/components/responses/InternalError" }
     patch:
       operationId: updateMe
-      x-planned: true
       summary: Set the caller's display name
       description: |
         What friends see in trips (member lists, invite previews). Trimmed;

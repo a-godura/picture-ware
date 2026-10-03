@@ -26,8 +26,9 @@ type fakeStore struct {
 
 	memberInfo map[string]photos.Member // "tripID/userID", set by CreateTrip/AddMember
 	invites    map[string]photos.Invite // by code
-	raceInvite *photos.Invite           // PutInvite: someone else's invite lands first, once
-	removeRace *photos.Invite           // RemoveMember: someone rotates the invite first, once
+	profiles   map[string]photos.Profile
+	raceInvite *photos.Invite // PutInvite: someone else's invite lands first, once
+	removeRace *photos.Invite // RemoveMember: someone rotates the invite first, once
 
 	err       error // returned by every method when set
 	memberErr error
@@ -212,16 +213,14 @@ type harness struct {
 	store   *fakeStore
 	presign *fakePresigner
 	objects *fakeObjects
-	dir     *fakeDirectory
 	codes   int // invite codes handed out
 	h       *Handler
 }
 
 func newHarness(s *fakeStore) *harness {
 	hs := &harness{store: s, presign: &fakePresigner{}, objects: &fakeObjects{}}
-	hs.dir = &fakeDirectory{names: map[string]string{testUser: "ana.silva", otherUser: "Ben"}}
 	hs.h = &Handler{
-		Store: s, Presigner: hs.presign, Objects: hs.objects, Directory: hs.dir,
+		Store: s, Presigner: hs.presign, Objects: hs.objects,
 		NewID: func() string { return "id-1" }, NewCode: hs.newCode, Now: func() time.Time { return fixedNow },
 	}
 	return hs

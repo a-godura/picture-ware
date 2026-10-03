@@ -246,18 +246,14 @@ Resources:
           TABLE_NAME: !Ref AppTable
           LEGACY_TABLE_NAME: !Ref PhotosByUserTable
           BUCKET_NAME: !Ref PhotosBucket
-          USER_POOL_ID: !Ref UserPool
       Policies:
         - Version: "2012-10-17"
           Statement:
             - Effect: Allow
               # UpdateItem: member counts and invite codes (inside transactions).
-              Action: [dynamodb:GetItem, dynamodb:PutItem, dynamodb:Query, dynamodb:DeleteItem, dynamodb:UpdateItem]
+              # BatchGetItem: members' display names (USER#<sub>/PROFILE).
+              Action: [dynamodb:GetItem, dynamodb:BatchGetItem, dynamodb:PutItem, dynamodb:Query, dynamodb:DeleteItem, dynamodb:UpdateItem]
               Resource: [!GetAtt AppTable.Arn, !GetAtt PhotosByUserTable.Arn]
-            - Effect: Allow
-              # Display names of trip members (name, or email before the "@").
-              Action: cognito-idp:AdminGetUser
-              Resource: !GetAtt UserPool.Arn
             - Effect: Allow
               # PutObject backs the presigned POST, GetObject the presigned GET.
               Action: [s3:PutObject, s3:GetObject, s3:DeleteObject]
@@ -301,6 +297,18 @@ Resources:
             ApiId: !Ref HttpApi
             Method: DELETE
             Path: /trips/{tripId}/photos/{photoId}
+        GetMe:
+          Type: HttpApi
+          Properties:
+            ApiId: !Ref HttpApi
+            Method: GET
+            Path: /me
+        UpdateMe:
+          Type: HttpApi
+          Properties:
+            ApiId: !Ref HttpApi
+            Method: PATCH
+            Path: /me
         ListTripMembers:
           Type: HttpApi
           Properties:
