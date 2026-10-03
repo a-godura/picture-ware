@@ -25,7 +25,13 @@ type Store interface {
 	ListTrips(ctx context.Context, userID string) ([]photos.Trip, error)
 	GetTrip(ctx context.Context, tripID string) (photos.Trip, error)
 	IsMember(ctx context.Context, tripID, userID string) (bool, error)
-	PutPhoto(ctx context.Context, p photos.Photo) error
+	// PutPhoto creates a pending photo and counts it against lim; it returns
+	// an error wrapping photos.ErrDailyLimit, ErrUserStorage or
+	// ErrTotalStorage (and writes nothing) when a limit would be exceeded.
+	PutPhoto(ctx context.Context, p photos.Photo, lim photos.Limits) error
+	// ReleaseStaleReservations frees userID's storage reservations for
+	// uploads started before cutoff that never landed.
+	ReleaseStaleReservations(ctx context.Context, userID string, cutoff time.Time) (int, error)
 	GetPhoto(ctx context.Context, tripID, id string) (photos.Photo, error)
 	// ListReadyPhotos returns one page of ready photos in listing order
 	// (photos.ListOrder) and the cursor of the next page ("" if none).
@@ -51,6 +57,7 @@ type Handler struct {
 	Objects   Objects
 	NewID     func() string
 	Now       func() time.Time
+	Limits    photos.Limits // upload quotas for POST /trips/{tripId}/photos
 }
 
 // TripView is a trip in API responses.
@@ -245,7 +252,13 @@ func (h *Handler) createPhoto(ctx context.Context, tripID, userID string, req ev
 		Status:      photos.StatusPending,
 		CreatedAt:   h.Now().UTC(),
 	}
-	if err := h.Store.PutPhoto(ctx, p); err != nil {
+	if err := h.putPhoto(ctx, p); err != nil {
+		for _, q := range []error{photos.ErrDailyLimit, photos.ErrUserStorage, photos.ErrTotalStorage} {
+			if errors.Is(err, q) {
+				slog.WarnContext(ctx, "upload quota reached", "user", userID, "quota", q.Error())
+				return errorResponse(http.StatusTooManyRequests, q.Error())
+			}
+		}
 		slog.ErrorContext(ctx, "store put failed", "err", err)
 		return errorResponse(http.StatusInternalServerError, "internal error")
 	}
@@ -255,6 +268,25 @@ func (h *Handler) createPhoto(ctx context.Context, tripID, userID string, req ev
 		return errorResponse(http.StatusInternalServerError, "internal error")
 	}
 	return jsonResponse(http.StatusCreated, CreateResponse{ID: p.ID, Upload: up})
+}
+
+// putPhoto stores a pending photo within the upload quotas. When a storage
+// cap is hit it first releases the user's reservations for uploads that
+// never landed, and retries once if that freed anything.
+func (h *Handler) putPhoto(ctx context.Context, p photos.Photo) error {
+	err := h.Store.PutPhoto(ctx, p, h.Limits)
+	if !errors.Is(err, photos.ErrUserStorage) && !errors.Is(err, photos.ErrTotalStorage) {
+		return err
+	}
+	n, rerr := h.Store.ReleaseStaleReservations(ctx, p.UploaderID, h.Now().Add(-photos.ReservationTTL))
+	if rerr != nil {
+		slog.ErrorContext(ctx, "release stale reservations failed", "err", rerr)
+	}
+	if n == 0 {
+		return err
+	}
+	slog.InfoContext(ctx, "released stale reservations", "user", p.UploaderID, "count", n)
+	return h.Store.PutPhoto(ctx, p, h.Limits)
 }
 
 // listPhotos returns one page of the trip's ready photos, in capture order

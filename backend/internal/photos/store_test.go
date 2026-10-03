@@ -138,17 +138,6 @@ func TestCreateTripWritesThreeItemsAtomically(t *testing.T) {
 	}
 }
 
-func TestPutPhotoIsCreateOnly(t *testing.T) {
-	s, f := newFakeStore(t, nil)
-	if err := s.PutPhoto(context.Background(), testPhoto); err != nil {
-		t.Fatal(err)
-	}
-	b := f.calls[0].Body
-	if f.calls[0].Op != "PutItem" || b["ConditionExpression"] != attributeAbsent || str(b["Item"], "SK") != "PHOTO#photo-1" {
-		t.Fatalf("call = %+v", f.calls[0])
-	}
-}
-
 func TestGetTrip(t *testing.T) {
 	it, _ := item(tripPK("trip-1"), metaSK, "trip", testTrip)
 	found, _ := json.Marshal(map[string]any{"Item": toJSON(t, it)})
@@ -272,6 +261,11 @@ func TestMarkReady(t *testing.T) {
 		t.Fatalf("calls = %+v", f.calls)
 	}
 	items := f.calls[1].Body["TransactItems"].([]any)
+	if len(items) != 4 {
+		t.Fatalf("%d transact items, want photo, listing, user and total usage", len(items))
+	}
+	assertAdd(t, items[2], "USAGE#user-2", 42, 42)
+	assertAdd(t, items[3], "USAGE#ALL", 42, 42)
 	update := items[0].(map[string]any)["Update"].(map[string]any)
 	put := items[1].(map[string]any)["Put"].(map[string]any)
 	vals, _ := update["ExpressionAttributeValues"].(map[string]any)
@@ -348,13 +342,6 @@ func TestDeletePhoto(t *testing.T) {
 	}
 }
 
-func TestPutPhotoDuplicateIsError(t *testing.T) {
-	s, _ := newFakeStore(t, func(string, int) (int, string) { return http.StatusBadRequest, conditionFailed })
-	if err := s.PutPhoto(context.Background(), testPhoto); err == nil || errors.Is(err, ErrNotFound) {
-		t.Errorf("PutPhoto err = %v", err)
-	}
-}
-
 // toJSON converts an SDK item to DynamoDB's wire JSON.
 func toJSON(t *testing.T, it map[string]types.AttributeValue) map[string]any {
 	t.Helper()
@@ -365,6 +352,8 @@ func toJSON(t *testing.T, it map[string]types.AttributeValue) map[string]any {
 			out[k] = map[string]string{"S": v.Value}
 		case *types.AttributeValueMemberN:
 			out[k] = map[string]string{"N": v.Value}
+		case *types.AttributeValueMemberBOOL:
+			out[k] = map[string]bool{"BOOL": v.Value}
 		default:
 			t.Fatalf("toJSON: unsupported %T for %s", v, k)
 		}

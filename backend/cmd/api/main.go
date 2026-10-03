@@ -6,6 +6,7 @@ import (
 	"context"
 	"log"
 	"os"
+	"strconv"
 	"strings"
 	"time"
 
@@ -40,6 +41,11 @@ func main() {
 		},
 		NewID: uuid.NewString,
 		Now:   time.Now,
+		Limits: photos.Limits{
+			DailyUploads: mustInt("QUOTA_DAILY_UPLOADS"),
+			UserBytes:    mustInt("QUOTA_USER_BYTES"),
+			TotalBytes:   mustInt("QUOTA_TOTAL_BYTES"),
+		},
 	}
 	legacy := &legacyapi.Handler{
 		Store:   &legacyphotos.DynamoStore{Client: db, Table: mustEnv("LEGACY_TABLE_NAME")},
@@ -64,6 +70,14 @@ func main() {
 func isLegacyRoute(routeKey string) bool {
 	_, path, _ := strings.Cut(routeKey, " ")
 	return path == "/photos" || strings.HasPrefix(path, "/photos/")
+}
+
+func mustInt(k string) int64 {
+	n, err := strconv.ParseInt(mustEnv(k), 10, 64)
+	if err != nil || n < 0 {
+		log.Fatalf("env %s must be a non-negative integer", k)
+	}
+	return n
 }
 
 func mustEnv(k string) string {

@@ -28,6 +28,14 @@ type fakeStore struct {
 	memberErr error
 	deleted   []string
 	lastLimit int
+
+	// Quotas: putErrs are returned by successive PutPhoto calls (nil = ok);
+	// stale is how many reservations ReleaseStaleReservations frees.
+	putErrs     []error
+	stale       int
+	putLimits   photos.Limits
+	putCalls    int
+	releaseCuts []time.Time
 }
 
 func newStore() *fakeStore {
@@ -82,12 +90,28 @@ func (f *fakeStore) IsMember(_ context.Context, tripID, userID string) (bool, er
 	return f.members[tripID+"/"+userID], f.memberErr
 }
 
-func (f *fakeStore) PutPhoto(_ context.Context, p photos.Photo) error {
+func (f *fakeStore) PutPhoto(_ context.Context, p photos.Photo, lim photos.Limits) error {
 	if f.err != nil {
 		return f.err
 	}
+	f.putLimits = lim
+	f.putCalls++
+	if len(f.putErrs) > 0 {
+		err := f.putErrs[0]
+		f.putErrs = f.putErrs[1:]
+		if err != nil {
+			return fmt.Errorf("put photo: %w", err)
+		}
+	}
 	f.photos[p.TripID+"/"+p.ID] = p
 	return nil
+}
+
+func (f *fakeStore) ReleaseStaleReservations(_ context.Context, userID string, cutoff time.Time) (int, error) {
+	f.releaseCuts = append(f.releaseCuts, cutoff)
+	n := f.stale
+	f.stale = 0
+	return n, nil
 }
 
 func (f *fakeStore) GetPhoto(_ context.Context, tripID, id string) (photos.Photo, error) {
@@ -174,6 +198,8 @@ func (f *fakePresigner) PresignGet(_ context.Context, key string) (string, error
 
 var fixedNow = time.Date(2026, 10, 1, 12, 0, 0, 0, time.UTC)
 
+var testLimits = photos.Limits{DailyUploads: 300, UserBytes: 5 << 30, TotalBytes: 50 << 30}
+
 const (
 	testUser  = "8f0b2c1e-1111-4a5b-9c3d-abcdef012345"
 	otherUser = "0a0a0a0a-2222-4b4b-8c8c-0123456789ab"
@@ -210,7 +236,7 @@ type harness struct {
 
 func newHarness(s *fakeStore) *harness {
 	hs := &harness{store: s, presign: &fakePresigner{}, objects: &fakeObjects{}}
-	hs.h = &Handler{Store: s, Presigner: hs.presign, Objects: hs.objects, NewID: func() string { return "id-1" }, Now: func() time.Time { return fixedNow }}
+	hs.h = &Handler{Store: s, Presigner: hs.presign, Objects: hs.objects, NewID: func() string { return "id-1" }, Now: func() time.Time { return fixedNow }, Limits: testLimits}
 	return hs
 }
 
@@ -412,6 +438,54 @@ func TestCreatePhoto(t *testing.T) {
 			stored := s.photos[tripID+"/id-1"]
 			if stored.TripID != tripID || stored.UploaderID != testUser || stored.Status != photos.StatusPending || !stored.CreatedAt.Equal(fixedNow) {
 				t.Fatalf("unexpected stored photo %+v", stored)
+			}
+		})
+	}
+}
+
+func TestCreatePhotoQuotas(t *testing.T) {
+	body := `{"lat":1,"lng":1,"contentType":"image/jpeg"}`
+	tests := []struct {
+		name        string
+		putErrs     []error
+		stale       int
+		wantStatus  int
+		wantErr     string
+		wantPuts    int
+		wantRelease bool
+	}{
+		{name: "daily limit", putErrs: []error{photos.ErrDailyLimit}, wantStatus: http.StatusTooManyRequests, wantErr: "daily upload limit reached", wantPuts: 1},
+		{name: "user storage, nothing stale", putErrs: []error{photos.ErrUserStorage}, wantStatus: http.StatusTooManyRequests, wantErr: "storage limit reached", wantPuts: 1, wantRelease: true},
+		{name: "total storage, nothing stale", putErrs: []error{photos.ErrTotalStorage}, wantStatus: http.StatusTooManyRequests, wantErr: "service storage limit reached", wantPuts: 1, wantRelease: true},
+		{name: "user storage freed by stale release", putErrs: []error{photos.ErrUserStorage, nil}, stale: 2, wantStatus: http.StatusCreated, wantPuts: 2, wantRelease: true},
+		{name: "still over after release", putErrs: []error{photos.ErrUserStorage, photos.ErrUserStorage}, stale: 1, wantStatus: http.StatusTooManyRequests, wantErr: "storage limit reached", wantPuts: 2, wantRelease: true},
+		{name: "other store error", putErrs: []error{errors.New("boom")}, wantStatus: http.StatusInternalServerError, wantPuts: 1},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			s := newStore().withTrip(tripID, testUser)
+			s.putErrs, s.stale = tt.putErrs, tt.stale
+			hs := newHarness(s)
+			req := inTrip("POST /trips/{tripId}/photos", testUser, tripID, nil)
+			req.Body = body
+			resp := hs.do(t, req)
+			expectStatus(t, resp, tt.wantStatus)
+			if tt.wantErr != "" {
+				if msg := errMsg(t, resp.Body); msg != tt.wantErr {
+					t.Fatalf("error = %q, want %q", msg, tt.wantErr)
+				}
+				if len(s.photos) != 0 {
+					t.Fatal("photo stored over quota")
+				}
+			}
+			if s.putCalls != tt.wantPuts || s.putLimits != testLimits {
+				t.Fatalf("PutPhoto calls = %d (want %d), limits %+v", s.putCalls, tt.wantPuts, s.putLimits)
+			}
+			if got := len(s.releaseCuts) > 0; got != tt.wantRelease {
+				t.Fatalf("released = %v, want %v", got, tt.wantRelease)
+			}
+			if tt.wantRelease && !s.releaseCuts[0].Equal(fixedNow.Add(-photos.ReservationTTL)) {
+				t.Fatalf("release cutoff = %v", s.releaseCuts[0])
 			}
 		})
 	}
