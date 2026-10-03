@@ -102,6 +102,25 @@ Resources:
       PointInTimeRecoverySpecification:
         PointInTimeRecoveryEnabled: true
 
+  # Legacy per-user photo table, used only by the /photos routes. Remove
+  # (with internal/legacy) once no client calls /photos.
+  PhotosByUserTable:
+    Type: AWS::DynamoDB::Table
+    DeletionPolicy: Delete
+    UpdateReplacePolicy: Delete
+    Properties:
+      BillingMode: PAY_PER_REQUEST
+      AttributeDefinitions:
+        - AttributeName: userId
+          AttributeType: S
+        - AttributeName: id
+          AttributeType: S
+      KeySchema:
+        - AttributeName: userId
+          KeyType: HASH
+        - AttributeName: id
+          KeyType: RANGE
+
   # ---------- Auth ----------
   UserPool:
     Type: AWS::Cognito::UserPool
@@ -216,21 +235,24 @@ Resources:
       BuildMethod: go1.x
     Properties:
       CodeUri: cmd/api/
-      Description: picture-ware /trips API
+      Description: picture-ware /trips API (+ legacy /photos)
       Environment:
         Variables:
           TABLE_NAME: !Ref AppTable
+          LEGACY_TABLE_NAME: !Ref PhotosByUserTable
           BUCKET_NAME: !Ref PhotosBucket
       Policies:
         - Version: "2012-10-17"
           Statement:
             - Effect: Allow
               Action: [dynamodb:GetItem, dynamodb:PutItem, dynamodb:Query, dynamodb:DeleteItem]
-              Resource: !GetAtt AppTable.Arn
+              Resource: [!GetAtt AppTable.Arn, !GetAtt PhotosByUserTable.Arn]
             - Effect: Allow
               # PutObject backs the presigned POST, GetObject the presigned GET.
               Action: [s3:PutObject, s3:GetObject, s3:DeleteObject]
-              Resource: !Sub "${PhotosBucket.Arn}/photos/*"
+              Resource:
+                - !Sub "${PhotosBucket.Arn}/trips/*"
+                - !Sub "${PhotosBucket.Arn}/photos/*"
       Events:
         ListTrips:
           Type: HttpApi
@@ -250,24 +272,42 @@ Resources:
             ApiId: !Ref HttpApi
             Method: GET
             Path: /trips/{tripId}
-        ListPhotos:
+        ListTripPhotos:
           Type: HttpApi
           Properties:
             ApiId: !Ref HttpApi
             Method: GET
             Path: /trips/{tripId}/photos
-        CreatePhoto:
+        CreateTripPhoto:
           Type: HttpApi
           Properties:
             ApiId: !Ref HttpApi
             Method: POST
             Path: /trips/{tripId}/photos
-        DeletePhoto:
+        DeleteTripPhoto:
           Type: HttpApi
           Properties:
             ApiId: !Ref HttpApi
             Method: DELETE
             Path: /trips/{tripId}/photos/{photoId}
+        CreatePhoto:
+          Type: HttpApi
+          Properties:
+            ApiId: !Ref HttpApi
+            Method: POST
+            Path: /photos
+        ListPhotos:
+          Type: HttpApi
+          Properties:
+            ApiId: !Ref HttpApi
+            Method: GET
+            Path: /photos
+        DeletePhoto:
+          Type: HttpApi
+          Properties:
+            ApiId: !Ref HttpApi
+            Method: DELETE
+            Path: /photos/{id}
 
   ApiFunctionLogGroup:
     Type: AWS::Logs::LogGroup
@@ -285,12 +325,13 @@ Resources:
       Environment:
         Variables:
           TABLE_NAME: !Ref AppTable
+          LEGACY_TABLE_NAME: !Ref PhotosByUserTable
       Policies:
         - Version: "2012-10-17"
           Statement:
             - Effect: Allow
               Action: dynamodb:UpdateItem
-              Resource: !GetAtt AppTable.Arn
+              Resource: [!GetAtt AppTable.Arn, !GetAtt PhotosByUserTable.Arn]
       Events:
         PhotoUploaded:
           Type: S3
@@ -302,6 +343,16 @@ Resources:
                 Rules:
                   - Name: prefix
                     Value: photos/
+        TripPhotoUploaded:
+          Type: S3
+          Properties:
+            Bucket: !Ref PhotosBucket
+            Events: s3:ObjectCreated:*
+            Filter:
+              S3Key:
+                Rules:
+                  - Name: prefix
+                    Value: trips/
 
   ProcessorFunctionLogGroup:
     Type: AWS::Logs::LogGroup
@@ -398,6 +449,9 @@ Outputs:
   BucketName:
     Description: Photo bucket
     Value: !Ref PhotosBucket
+  LegacyTableName:
+    Description: Legacy per-user photo table (/photos routes)
+    Value: !Ref PhotosByUserTable
   TableName:
     Description: Photo metadata table (pk userId, sk id)
     Value: !Ref AppTable

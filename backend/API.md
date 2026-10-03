@@ -164,7 +164,7 @@ Body limit 4 KiB.
   "upload": {
     "url": "https://<bucket>.s3.us-east-2.amazonaws.com",
     "fields": {
-      "key": "photos/<tripId>/6f1c0e8e-5d0b-4b8a-9f1e-2a3b4c5d6e7f",
+      "key": "trips/<tripId>/6f1c0e8e-5d0b-4b8a-9f1e-2a3b4c5d6e7f",
       "Content-Type": "image/jpeg",
       "policy": "…",
       "X-Amz-Algorithm": "AWS4-HMAC-SHA256",
@@ -193,7 +193,7 @@ curl -F key=… -F Content-Type=image/jpeg -F policy=… … -F file=@photo.jpg 
 
 The presigned policy enforces:
 
-- exact key `photos/<tripId>/<id>`
+- exact key `trips/<tripId>/<id>`
 - exact `Content-Type` (the one sent when creating the photo)
 - size 1 byte … 15 MiB (15,728,640 bytes)
 - expires 10 minutes after creation
@@ -255,6 +255,13 @@ part-way leaves the photo listed and the client can simply retry.
 - `404` if the trip or photo doesn't exist, or the caller isn't a member.
 - Deleting a `pending` photo (upload never finished) also works.
 - Errors: `401` (see Authentication), `403`, `404`, `429`, `500`.
+
+## Legacy `/photos` routes (deprecated)
+
+`POST /photos`, `GET /photos` and `DELETE /photos/{id}` still work exactly as
+before trips existed (photos owned by the caller, objects at
+`photos/<userId>/<id>`, separate table) so already-installed app builds keep
+working. New clients use `/trips`. They'll be removed once no client calls them.
 
 ## Limits and cost guardrails
 

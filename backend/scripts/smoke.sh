@@ -48,7 +48,7 @@ cleanup() {
       delete_key "TRIP#$trip" "$sk"
     done
     delete_key "USER#$creator" "TRIP#$trip"
-    "${AWS[@]}" s3 rm "s3://$BUCKET/photos/$trip/" --recursive >/dev/null 2>&1 || true
+    "${AWS[@]}" s3 rm "s3://$BUCKET/trips/$trip/" --recursive >/dev/null 2>&1 || true
   done
   for u in "${USERS[@]+"${USERS[@]}"}"; do
     "${AWS[@]}" cognito-idp admin-delete-user --user-pool-id "$POOL" --username "$u" >/dev/null || true
@@ -107,7 +107,7 @@ create_photo() {
   api POST "$1" "/trips/$2/photos" '{"lat":37.7749,"lng":-122.4194,"takenAt":"2026-09-01T10:00:00Z","contentType":"image/jpeg"}'
   [ "$STATUS" = 201 ] || fail "POST /trips/$2/photos -> $STATUS $(cat "$TMP/resp.json")"
   ID="$(jq -r .id "$TMP/resp.json")"
-  [ "$(jq -r '.upload.fields.key' "$TMP/resp.json")" = "photos/$2/$ID" ] || fail "upload key not photos/<trip>/<id>"
+  [ "$(jq -r '.upload.fields.key' "$TMP/resp.json")" = "trips/$2/$ID" ] || fail "upload key not trips/<trip>/<id>"
   UPLOAD_URL="$(jq -r .upload.url "$TMP/resp.json")"
   jq -r '.upload.fields | to_entries[] | "\(.key)=\(.value)"' "$TMP/resp.json" > "$TMP/fields.txt"
 }
@@ -122,7 +122,7 @@ upload() {
   STATUS="$(curl -sS -o "$TMP/upload.xml" -w '%{http_code}' "${args[@]}" -F "file=@$1" "$UPLOAD_URL" || true)"
 }
 
-object_exists() { "${AWS[@]}" s3api head-object --bucket "$BUCKET" --key "photos/$1" >/dev/null 2>&1; }
+object_exists() { "${AWS[@]}" s3api head-object --bucket "$BUCKET" --key "trips/$1" >/dev/null 2>&1; }
 
 echo "API: $API"
 
@@ -146,7 +146,12 @@ api GET "$TMP/a.idauth" /trips
 [ "$STATUS" = 401 ] || fail "GET /trips with ID token -> $STATUS"
 pass "GET /trips with ID token (not access token) -> 401 $(jq -c . "$TMP/resp.json")"
 
-# 2. Trips
+# 2. Legacy /photos routes still answer (for the currently shipped app)
+api GET "$TMP/a.auth" /photos
+[ "$STATUS" = 200 ] && jq -e '.photos | type == "array"' "$TMP/resp.json" >/dev/null || fail "legacy GET /photos -> $STATUS"
+pass "legacy GET /photos -> 200"
+
+# 3. Trips
 api POST "$TMP/a.auth" /trips '{"name":"   ","startDate":"2026-10-01"}'
 [ "$STATUS" = 400 ] || fail "blank trip name -> $STATUS"
 pass "POST /trips blank name -> 400 $(jq -c . "$TMP/resp.json")"
@@ -163,7 +168,7 @@ api GET "$TMP/a.auth" "/trips/$A_TRIP"
 [ "$STATUS" = 200 ] || fail "A: GET /trips/{id} -> $STATUS"
 pass "A: GET /trips/{id} -> 200"
 
-# 3. Photo validation (authenticated member)
+# 4. Photo validation (authenticated member)
 api POST "$TMP/a.auth" "/trips/$A_TRIP/photos" '{"lat":37.7,"lng":-122.4,"contentType":"image/png"}'
 [ "$STATUS" = 400 ] && jq -e .error "$TMP/resp.json" >/dev/null || fail "png contentType -> $STATUS"
 pass "POST photo contentType=image/png -> 400 $(jq -c . "$TMP/resp.json")"
@@ -171,10 +176,10 @@ api POST "$TMP/a.auth" "/trips/$A_TRIP/photos" '{"lat":91,"lng":0,"contentType":
 [ "$STATUS" = 400 ] || fail "lat=91 -> $STATUS"
 pass "POST photo lat=91 -> 400 $(jq -c . "$TMP/resp.json")"
 
-# 4. Happy path: A uploads into the trip
+# 5. Happy path: A uploads into the trip
 create_photo "$TMP/a.auth" "$A_TRIP"
 A_ID="$ID"
-pass "A: POST /trips/{id}/photos -> 201 id=$ID key=photos/<trip>/<id>"
+pass "A: POST /trips/{id}/photos -> 201 id=$ID key=trips/<trip>/<id>"
 upload "$IMG"
 [ "$STATUS" = 204 ] || fail "upload -> $STATUS $(cat "$TMP/upload.xml")"
 pass "A: presigned POST upload of $(wc -c < "$IMG" | tr -d ' ')-byte JPEG -> 204"
@@ -195,7 +200,7 @@ STATUS="$(curl -sS -o "$TMP/download.jpg" -w '%{http_code}' "$IMAGE_URL")"
 [ "$STATUS" = 200 ] && cmp -s "$IMG" "$TMP/download.jpg" || fail "imageUrl -> $STATUS / content mismatch"
 pass "A: imageUrl -> 200, bytes identical to upload"
 
-# 5. Isolation: B is not a member of A's trip
+# 6. Isolation: B is not a member of A's trip
 api GET "$TMP/b.auth" /trips
 [ "$STATUS" = 200 ] || fail "B: GET /trips -> $STATUS"
 jq -e --arg t "$A_TRIP" 'all(.trips[]; .id != $t)' "$TMP/resp.json" >/dev/null || fail "B sees A's trip"
@@ -209,7 +214,7 @@ api POST "$TMP/b.auth" "/trips/$A_TRIP/photos" '{"lat":1,"lng":1,"contentType":"
 [ "$STATUS" = 404 ] || fail "B: POST photo into A's trip -> $STATUS"
 pass "B: POST photo into A's trip -> 404"
 
-# 6. Rejected uploads (against a fresh pending photo in A's trip)
+# 7. Rejected uploads (against a fresh pending photo in A's trip)
 create_photo "$TMP/a.auth" "$A_TRIP"
 upload "$IMG" image/png
 [ "$STATUS" = 403 ] || fail "wrong Content-Type upload -> $STATUS"
@@ -229,13 +234,13 @@ pass "pending photo $ID not listed"
 # B can't write into A's trip prefix: B's own upload slot pins B's trip key.
 create_trip "$TMP/b.auth" "$SUB_B" "B's trip"
 create_photo "$TMP/b.auth" "$TRIP"
-sed -i.bak "s|^key=.*|key=photos/$A_TRIP/$ID|" "$TMP/fields.txt"
+sed -i.bak "s|^key=.*|key=trips/$A_TRIP/$ID|" "$TMP/fields.txt"
 upload "$IMG"
 [ "$STATUS" = 403 ] || fail "B uploading into A's trip key -> $STATUS"
 object_exists "$A_TRIP/$ID" && fail "B wrote into A's trip prefix"
 pass "B: upload with key rewritten to A's trip -> 403"
 
-# 7. Delete
+# 8. Delete
 del() { STATUS="$(curl -sS -o "$TMP/resp.json" -w '%{http_code}' -X DELETE -H "@$1" "$API/trips/$2/photos/$3")"; }
 del /dev/null "$A_TRIP" "$A_ID"
 [ "$STATUS" = 401 ] || fail "DELETE without token -> $STATUS"

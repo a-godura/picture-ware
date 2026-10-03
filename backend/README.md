@@ -8,7 +8,9 @@ Every route sits behind a Cognito JWT authorizer (access tokens only).
 Everything lives in a **trip**; only its members can see it. One DynamoDB
 table with generic `PK`/`SK` keys holds trips, members and photos (item
 shapes in [internal/photos/store.go](internal/photos/store.go)). Photo
-objects are at `photos/<tripId>/<id>`.
+objects are at `trips/<tripId>/<id>`. The pre-trips `/photos` API (photos
+per user, `photos/<userId>/<id>`, its own table) still runs from
+[internal/legacy](internal/legacy) until no client uses it.
 
 ```
 cmd/api          /trips and /trips/{tripId}/photos (HTTP API, payload v2, user from JWT claims)

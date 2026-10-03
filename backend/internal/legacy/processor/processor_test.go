@@ -7,11 +7,11 @@ import (
 
 	"github.com/aws/aws-lambda-go/events"
 
-	"github.com/a-godura/picture-ware/backend/internal/photos"
+	"github.com/a-godura/picture-ware/backend/internal/legacy/photos"
 )
 
 type call struct {
-	trip string
+	user string
 	id   string
 	size int64
 }
@@ -21,8 +21,8 @@ type fakeStore struct {
 	errs  map[string]error
 }
 
-func (f *fakeStore) MarkReady(_ context.Context, tripID, id string, size int64) error {
-	f.calls = append(f.calls, call{tripID, id, size})
+func (f *fakeStore) MarkReady(_ context.Context, userID, id string, size int64) error {
+	f.calls = append(f.calls, call{userID, id, size})
 	return f.errs[id]
 }
 
@@ -38,30 +38,29 @@ func TestHandle(t *testing.T) {
 		wantCalls []call
 		wantErr   bool
 	}{
-		{name: "single photo", records: []events.S3EventRecord{record("trips/u1/abc", 1234)}, wantCalls: []call{{"u1", "abc", 1234}}},
-		{name: "url-encoded key", records: []events.S3EventRecord{record("trips/u1/a%2Db", 1)}, wantCalls: []call{{"u1", "a-b", 1}}},
-		{name: "invalid id skipped", records: []events.S3EventRecord{record("trips/u1/a%2Bb", 1)}},
+		{name: "single photo", records: []events.S3EventRecord{record("photos/u1/abc", 1234)}, wantCalls: []call{{"u1", "abc", 1234}}},
+		{name: "url-encoded key", records: []events.S3EventRecord{record("photos/u1/a%2Bb", 1)}, wantCalls: []call{{"u1", "a+b", 1}}},
 		{
-			name:      "multiple trips",
-			records:   []events.S3EventRecord{record("trips/u1/a", 1), record("trips/u2/b", 2)},
+			name:      "multiple users",
+			records:   []events.S3EventRecord{record("photos/u1/a", 1), record("photos/u2/b", 2)},
 			wantCalls: []call{{"u1", "a", 1}, {"u2", "b", 2}},
 		},
 		{name: "wrong prefix skipped", records: []events.S3EventRecord{record("other/u1/a", 1)}},
-		{name: "legacy key without user skipped", records: []events.S3EventRecord{record("trips/a", 1)}},
-		{name: "too deep skipped", records: []events.S3EventRecord{record("trips/u1/a/b", 1)}},
-		{name: "empty id skipped", records: []events.S3EventRecord{record("trips/u1/", 1)}},
-		{name: "empty user skipped", records: []events.S3EventRecord{record("trips//a", 1)}},
-		{name: "invalid user skipped", records: []events.S3EventRecord{record("trips/u.1/a", 1)}},
-		{name: "bad escape skipped", records: []events.S3EventRecord{record("trips/u1/%zz", 1)}},
+		{name: "legacy key without user skipped", records: []events.S3EventRecord{record("photos/a", 1)}},
+		{name: "too deep skipped", records: []events.S3EventRecord{record("photos/u1/a/b", 1)}},
+		{name: "empty id skipped", records: []events.S3EventRecord{record("photos/u1/", 1)}},
+		{name: "empty user skipped", records: []events.S3EventRecord{record("photos//a", 1)}},
+		{name: "invalid user skipped", records: []events.S3EventRecord{record("photos/u.1/a", 1)}},
+		{name: "bad escape skipped", records: []events.S3EventRecord{record("photos/u1/%zz", 1)}},
 		{
 			name:      "unknown id is not an error",
-			records:   []events.S3EventRecord{record("trips/u1/ghost", 1)},
+			records:   []events.S3EventRecord{record("photos/u1/ghost", 1)},
 			errs:      map[string]error{"ghost": photos.ErrNotFound},
 			wantCalls: []call{{"u1", "ghost", 1}},
 		},
 		{
 			name:      "store failure returned, other records still processed",
-			records:   []events.S3EventRecord{record("trips/u1/bad", 1), record("trips/u1/good", 2)},
+			records:   []events.S3EventRecord{record("photos/u1/bad", 1), record("photos/u1/good", 2)},
 			errs:      map[string]error{"bad": errors.New("throttled")},
 			wantCalls: []call{{"u1", "bad", 1}, {"u1", "good", 2}},
 			wantErr:   true,

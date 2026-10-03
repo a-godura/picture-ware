@@ -381,7 +381,7 @@ func TestCreatePhoto(t *testing.T) {
 			if err := json.Unmarshal([]byte(resp.Body), &got); err != nil {
 				t.Fatal(err)
 			}
-			if got.ID != "id-1" || got.Upload.Fields["key"] != "photos/"+tripID+"/id-1" {
+			if got.ID != "id-1" || got.Upload.Fields["key"] != "trips/"+tripID+"/id-1" {
 				t.Fatalf("unexpected response %+v", got)
 			}
 			stored := s.photos[tripID+"/id-1"]
@@ -410,7 +410,7 @@ func TestListPhotos(t *testing.T) {
 	var ids []string
 	for _, p := range got.Photos {
 		ids = append(ids, p.ID)
-		if p.ImageURL != "https://get.example/photos/"+tripID+"/"+p.ID {
+		if p.ImageURL != "https://get.example/trips/"+tripID+"/"+p.ID {
 			t.Fatalf("imageUrl %q", p.ImageURL)
 		}
 	}
@@ -463,7 +463,7 @@ func TestDeletePhoto(t *testing.T) {
 			if stillThere == tt.wantDeleted {
 				t.Fatalf("record deleted = %v, want %v", !stillThere, tt.wantDeleted)
 			}
-			if tt.wantDeleted && (len(hs.objects.deleted) != 1 || hs.objects.deleted[0] != "photos/"+tripID+"/p1") {
+			if tt.wantDeleted && (len(hs.objects.deleted) != 1 || hs.objects.deleted[0] != "trips/"+tripID+"/p1") {
 				t.Fatalf("object deletes = %v", hs.objects.deleted)
 			}
 		})

@@ -16,9 +16,10 @@ const (
 	StatusReady   = "ready"
 )
 
-// KeyPrefix is the S3 key prefix under which photo objects are stored. Each
-// object lives at photos/<tripId>/<id>.
-const KeyPrefix = "photos/"
+// KeyPrefix is the S3 key prefix under which trip photo objects are stored.
+// Each object lives at trips/<tripId>/<id>. (photos/ belongs to the legacy
+// per-user API.)
+const KeyPrefix = "trips/"
 
 // MaxUploadBytes is the largest photo accepted by the presigned POST policy.
 const MaxUploadBytes = 15 << 20 // 15 MiB
@@ -54,7 +55,7 @@ type Photo struct {
 	CreatedAt   time.Time  `dynamodbav:"createdAt"`
 }
 
-// ObjectKey returns the S3 key for a trip's photo: photos/<tripID>/<id>.
+// ObjectKey returns the S3 key for a trip's photo: trips/<tripID>/<id>.
 func ObjectKey(tripID, id string) string { return KeyPrefix + tripID + "/" + id }
 
 // ParseObjectKey is the inverse of ObjectKey. It rejects keys outside

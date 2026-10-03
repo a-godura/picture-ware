@@ -1,10 +1,12 @@
 #!/usr/bin/env bash
-# One-off migration (October 2026): photos used to belong to a user
-# (old table keyed userId/id, objects at photos/<userId>/<id>). Now they
-# belong to a trip. For every user in BACKUP (a `dynamodb scan --output json`
-# of the old table), this creates a trip called "My first trip" with that user
-# as creator and member, moves their photos into it, and moves each object to
-# photos/<tripId>/<id>. Safe to re-run: it skips users who already have trips.
+# One-off migration (October 2026): photos used to belong to a user (legacy
+# table keyed userId/id, objects at photos/<userId>/<id>). Now they belong to
+# a trip. For every user in BACKUP (a `dynamodb scan --output json` of the
+# legacy table), this creates a trip called "My first trip" with that user as
+# creator and member, copies their photo records into it, and copies each
+# object to trips/<tripId>/<id>. The legacy data is left untouched, so the
+# old /photos API keeps working. Safe to re-run: it skips users who already
+# have trips.
 #
 # Usage: scripts/migrate-0001-trips.sh BACKUP.json
 set -euo pipefail
@@ -52,8 +54,8 @@ for user in $(jq -r '[.Items[].userId.S] | unique | .[]' "$BACKUP"); do
     put "$(jq -c --arg t "$trip" --arg u "$user" --arg id "$id" \
       'del(.userId) + {PK:{S:("TRIP#"+$t)}, SK:{S:("PHOTO#"+$id)}, type:{S:"photo"}, tripId:{S:$t}, uploaderId:{S:$u}}' <<<"$old")"
     if "${AWS[@]}" s3api head-object --bucket "$BUCKET" --key "photos/$user/$id" >/dev/null 2>&1; then
-      "${AWS[@]}" s3 mv "s3://$BUCKET/photos/$user/$id" "s3://$BUCKET/photos/$trip/$id" >/dev/null
-      echo "  moved photo $id"
+      "${AWS[@]}" s3 cp "s3://$BUCKET/photos/$user/$id" "s3://$BUCKET/trips/$trip/$id" >/dev/null
+      echo "  copied photo $id"
     else
       echo "  photo $id: no object at photos/$user/$id (record kept as-is)"
     fi
