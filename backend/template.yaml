@@ -100,6 +100,11 @@ Resources:
           KeyType: RANGE
       PointInTimeRecoverySpecification:
         PointInTimeRecoveryEnabled: true
+      # Hard ceiling on on-demand throughput (and so on request spend):
+      # requests above it are throttled, not billed.
+      OnDemandThroughput:
+        MaxReadRequestUnits: 100
+        MaxWriteRequestUnits: 25
 
   # Legacy per-user photo table, used only by the /photos routes. Remove
   # (with internal/legacy) once no client calls /photos.
@@ -329,8 +334,13 @@ Resources:
         - Version: "2012-10-17"
           Statement:
             - Effect: Allow
+              # MarkReady reads the pending record, then (in one transaction)
+              # updates it and puts its listing copy.
+              Action: [dynamodb:GetItem, dynamodb:UpdateItem, dynamodb:PutItem]
+              Resource: !GetAtt AppTable.Arn
+            - Effect: Allow
               Action: dynamodb:UpdateItem
-              Resource: [!GetAtt AppTable.Arn, !GetAtt PhotosByUserTable.Arn]
+              Resource: !GetAtt PhotosByUserTable.Arn
       Events:
         PhotoUploaded:
           Type: S3

@@ -7,9 +7,11 @@ import (
 	"encoding/base64"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"log/slog"
 	"net/http"
 	"sort"
+	"strconv"
 	"time"
 
 	"github.com/aws/aws-lambda-go/events"
@@ -25,8 +27,10 @@ type Store interface {
 	IsMember(ctx context.Context, tripID, userID string) (bool, error)
 	PutPhoto(ctx context.Context, p photos.Photo) error
 	GetPhoto(ctx context.Context, tripID, id string) (photos.Photo, error)
-	ListReadyPhotos(ctx context.Context, tripID string) ([]photos.Photo, error)
-	DeletePhoto(ctx context.Context, tripID, id string) error
+	// ListReadyPhotos returns one page of ready photos in listing order
+	// (photos.ListOrder) and the cursor of the next page ("" if none).
+	ListReadyPhotos(ctx context.Context, tripID string, limit int, cursor string) ([]photos.Photo, string, error)
+	DeletePhoto(ctx context.Context, p photos.Photo) error
 }
 
 // Objects deletes stored photo files.
@@ -83,8 +87,15 @@ type PhotoView struct {
 
 // ListResponse is the 200 body of GET /trips/{tripId}/photos.
 type ListResponse struct {
-	Photos []PhotoView `json:"photos"`
+	Photos     []PhotoView `json:"photos"`
+	NextCursor *string     `json:"nextCursor"`
 }
+
+// Page size of GET /trips/{tripId}/photos (?limit=).
+const (
+	DefaultPageSize = 200
+	MaxPageSize     = 500
+)
 
 const maxBodyBytes = 4 << 10
 
@@ -140,7 +151,7 @@ func (h *Handler) Handle(ctx context.Context, req events.APIGatewayV2HTTPRequest
 	case "GET /trips/{tripId}":
 		return h.getTrip(ctx, tripID), nil
 	case "GET /trips/{tripId}/photos":
-		return h.listPhotos(ctx, tripID), nil
+		return h.listPhotos(ctx, tripID, req.QueryStringParameters), nil
 	case "POST /trips/{tripId}/photos":
 		return h.createPhoto(ctx, tripID, userID, req), nil
 	}
@@ -246,24 +257,29 @@ func (h *Handler) createPhoto(ctx context.Context, tripID, userID string, req ev
 	return jsonResponse(http.StatusCreated, CreateResponse{ID: p.ID, Upload: up})
 }
 
-func (h *Handler) listPhotos(ctx context.Context, tripID string) events.APIGatewayV2HTTPResponse {
-	items, err := h.Store.ListReadyPhotos(ctx, tripID)
+// listPhotos returns one page of the trip's ready photos, in capture order
+// (photos without a capture time last, by upload time) across pages.
+func (h *Handler) listPhotos(ctx context.Context, tripID string, query map[string]string) events.APIGatewayV2HTTPResponse {
+	limit := DefaultPageSize
+	if s, ok := query["limit"]; ok {
+		n, err := strconv.Atoi(s)
+		if err != nil || n < 1 || n > MaxPageSize {
+			return errorResponse(http.StatusBadRequest, fmt.Sprintf("limit must be an integer from 1 to %d", MaxPageSize))
+		}
+		limit = n
+	}
+	items, next, err := h.Store.ListReadyPhotos(ctx, tripID, limit, query["cursor"])
+	if errors.Is(err, photos.ErrInvalidCursor) {
+		return errorResponse(http.StatusBadRequest, "invalid cursor")
+	}
 	if err != nil {
 		slog.ErrorContext(ctx, "list failed", "err", err)
 		return errorResponse(http.StatusInternalServerError, "internal error")
 	}
-	// Capture order; photos without a capture time go last, by upload time.
-	sort.SliceStable(items, func(i, j int) bool {
-		a, b := items[i], items[j]
-		switch {
-		case a.TakenAt != nil && b.TakenAt != nil:
-			return a.TakenAt.Before(*b.TakenAt)
-		case (a.TakenAt == nil) != (b.TakenAt == nil):
-			return a.TakenAt != nil
-		}
-		return a.CreatedAt.Before(b.CreatedAt)
-	})
 	out := ListResponse{Photos: make([]PhotoView, 0, len(items))}
+	if next != "" {
+		out.NextCursor = &next
+	}
 	for _, p := range items {
 		url, err := h.Presigner.PresignGet(ctx, photos.ObjectKey(tripID, p.ID))
 		if err != nil {
@@ -300,7 +316,7 @@ func (h *Handler) deletePhoto(ctx context.Context, tripID, userID, id string) ev
 		slog.ErrorContext(ctx, "delete object failed", "id", id, "err", err)
 		return errorResponse(http.StatusInternalServerError, "internal error")
 	}
-	err = h.Store.DeletePhoto(ctx, tripID, id)
+	err = h.Store.DeletePhoto(ctx, p)
 	if errors.Is(err, photos.ErrNotFound) {
 		return errorResponse(http.StatusNotFound, "photo not found")
 	}

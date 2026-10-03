@@ -180,54 +180,178 @@ func TestIsMember(t *testing.T) {
 	}
 }
 
-func TestListReadyPhotosPagesAndFilters(t *testing.T) {
-	p1, _ := item("TRIP#trip-1", "PHOTO#a", "photo", Photo{TripID: "trip-1", ID: "a", Status: StatusReady})
-	p2, _ := item("TRIP#trip-1", "PHOTO#b", "photo", Photo{TripID: "trip-1", ID: "b", Status: StatusReady})
-	pages := []map[string]any{
-		{"Items": []any{toJSON(t, p1)}, "LastEvaluatedKey": map[string]any{"PK": map[string]string{"S": "TRIP#trip-1"}, "SK": map[string]string{"S": "PHOTO#a"}}},
-		{"Items": []any{toJSON(t, p2)}},
+func TestListOrder(t *testing.T) {
+	at := func(s string) *time.Time { v, _ := time.Parse(time.RFC3339Nano, s); return &v }
+	// Expected listing order: by capture time across time zones and
+	// sub-second precision, undated last by upload time.
+	ordered := []Photo{
+		{ID: "z", TakenAt: at("2026-10-01T10:00:00+02:00")}, // 08:00Z
+		{ID: "a", TakenAt: at("2026-10-01T09:00:00Z")},
+		{ID: "b", TakenAt: at("2026-10-01T09:00:00.5Z")},
+		{ID: "c", TakenAt: at("2026-10-01T09:00:01Z")},
+		{ID: "u1", CreatedAt: *at("2026-09-01T00:00:00Z")},
+		{ID: "u2", CreatedAt: *at("2026-10-01T00:00:00Z")},
 	}
-	s, f := newFakeStore(t, func(_ string, n int) (int, string) {
-		b, _ := json.Marshal(pages[n])
-		return http.StatusOK, string(b)
+	for i := 1; i < len(ordered); i++ {
+		if !(readySK(ordered[i-1]) < readySK(ordered[i])) {
+			t.Errorf("%s (%s) should sort before %s (%s)", ordered[i-1].ID, readySK(ordered[i-1]), ordered[i].ID, readySK(ordered[i]))
+		}
+	}
+}
+
+func TestCursorRoundTrip(t *testing.T) {
+	sk := readySK(testPhoto)
+	got, err := DecodeCursor(EncodeCursor(sk))
+	if err != nil || got != sk {
+		t.Fatalf("DecodeCursor = %q, %v", got, err)
+	}
+	for _, bad := range []string{"%%%", EncodeCursor("PHOTO#x"), EncodeCursor("MEMBER#u"), EncodeCursor("READY#" + strings.Repeat("x", 600))} {
+		if _, err := DecodeCursor(bad); !errors.Is(err, ErrInvalidCursor) || !errors.Is(err, ErrValidation) {
+			t.Errorf("DecodeCursor(%q) err = %v", bad, err)
+		}
+	}
+}
+
+func TestListReadyPhotosQueriesOnlyReadyRangeOnePage(t *testing.T) {
+	ready := testPhoto
+	ready.Status = StatusReady
+	it, _ := item(tripPK("trip-1"), readySK(ready), "readyPhoto", ready)
+	page, _ := json.Marshal(map[string]any{
+		"Items":            []any{toJSON(t, it)},
+		"LastEvaluatedKey": map[string]any{"PK": map[string]string{"S": "TRIP#trip-1"}, "SK": map[string]string{"S": readySK(ready)}},
 	})
-	got, err := s.ListReadyPhotos(context.Background(), "trip-1")
-	if err != nil || len(got) != 2 || got[0].ID != "a" || got[1].ID != "b" {
-		t.Fatalf("ListReadyPhotos = %+v, %v", got, err)
+	s, f := newFakeStore(t, func(string, int) (int, string) { return http.StatusOK, string(page) })
+	got, next, err := s.ListReadyPhotos(context.Background(), "trip-1", 1, "")
+	if err != nil || len(got) != 1 || got[0].ID != "photo-1" || next != EncodeCursor(readySK(ready)) {
+		t.Fatalf("ListReadyPhotos = %+v, %q, %v", got, next, err)
+	}
+	if len(f.calls) != 1 {
+		t.Fatalf("%d calls, want exactly one page", len(f.calls))
 	}
 	q := f.calls[0].Body
-	if q["FilterExpression"] != "#s = :status" || q["KeyConditionExpression"] != "PK = :pk AND begins_with(SK, :sk)" {
+	vals, _ := q["ExpressionAttributeValues"].(map[string]any)
+	if q["Limit"] != float64(1) || q["FilterExpression"] != nil || str(vals, ":sk") != "READY#" || q["ExclusiveStartKey"] != nil {
 		t.Fatalf("query = %v", q)
 	}
-	if f.calls[1].Body["ExclusiveStartKey"] == nil {
-		t.Fatal("second page didn't continue from LastEvaluatedKey")
+
+	// Next page starts after the cursor; no LastEvaluatedKey means no cursor.
+	s, f = newFakeStore(t, func(string, int) (int, string) { return http.StatusOK, `{"Items":[]}` })
+	got, next, err = s.ListReadyPhotos(context.Background(), "trip-1", 200, EncodeCursor(readySK(ready)))
+	if err != nil || len(got) != 0 || next != "" {
+		t.Fatalf("second page = %+v, %q, %v", got, next, err)
+	}
+	if str(f.calls[0].Body["ExclusiveStartKey"], "SK") != readySK(ready) {
+		t.Fatalf("ExclusiveStartKey = %v", f.calls[0].Body["ExclusiveStartKey"])
+	}
+
+	// A bad cursor never reaches DynamoDB.
+	s, f = newFakeStore(t, nil)
+	if _, _, err := s.ListReadyPhotos(context.Background(), "trip-1", 200, "bogus!"); !errors.Is(err, ErrInvalidCursor) || len(f.calls) != 0 {
+		t.Fatalf("bad cursor: err %v, %d calls", err, len(f.calls))
 	}
 }
 
-func TestConditionFailedMapsToNotFound(t *testing.T) {
-	s, _ := newFakeStore(t, func(string, int) (int, string) { return http.StatusBadRequest, conditionFailed })
-	if err := s.DeletePhoto(context.Background(), "trip-1", "photo-1"); !errors.Is(err, ErrNotFound) {
-		t.Errorf("DeletePhoto err = %v", err)
-	}
-	if err := s.MarkReady(context.Background(), "trip-1", "photo-1", 42); !errors.Is(err, ErrNotFound) {
-		t.Errorf("MarkReady err = %v", err)
-	}
-	// A duplicate create is an error, not "not found".
-	if err := s.PutPhoto(context.Background(), testPhoto); err == nil || errors.Is(err, ErrNotFound) {
-		t.Errorf("PutPhoto err = %v", err)
-	}
+// getResponse is a GetItem response holding p's PHOTO# record.
+func getResponse(t *testing.T, p Photo) string {
+	it, _ := item(tripPK(p.TripID), photoSK(p.ID), "photo", p)
+	b, _ := json.Marshal(map[string]any{"Item": toJSON(t, it)})
+	return string(b)
 }
 
-func TestMarkReadyRequest(t *testing.T) {
-	s, f := newFakeStore(t, nil)
+func TestMarkReady(t *testing.T) {
+	s, f := newFakeStore(t, func(op string, _ int) (int, string) {
+		if op == "GetItem" {
+			return http.StatusOK, getResponse(t, testPhoto)
+		}
+		return http.StatusOK, "{}"
+	})
 	if err := s.MarkReady(context.Background(), "trip-1", "photo-1", 42); err != nil {
 		t.Fatal(err)
 	}
-	b := f.calls[0].Body
-	vals, _ := b["ExpressionAttributeValues"].(map[string]any)
+	if len(f.calls) != 2 || f.calls[1].Op != "TransactWriteItems" {
+		t.Fatalf("calls = %+v", f.calls)
+	}
+	items := f.calls[1].Body["TransactItems"].([]any)
+	update := items[0].(map[string]any)["Update"].(map[string]any)
+	put := items[1].(map[string]any)["Put"].(map[string]any)
+	vals, _ := update["ExpressionAttributeValues"].(map[string]any)
 	size, _ := vals[":size"].(map[string]any)
-	if b["ConditionExpression"] != attributeExists || str(b["Key"], "SK") != "PHOTO#photo-1" || size["N"] != "42" {
-		t.Fatalf("update = %v", b)
+	if update["ConditionExpression"] != "#s = :pending" || str(update["Key"], "SK") != "PHOTO#photo-1" || size["N"] != "42" {
+		t.Fatalf("update = %v", update)
+	}
+	want := readySK(testPhoto)
+	if str(put["Item"], "SK") != want || str(put["Item"], "status") != StatusReady || str(put["Item"], "uploaderId") != "user-2" {
+		t.Fatalf("listing item = %v, want SK %s", put["Item"], want)
+	}
+
+	// Already ready (duplicate S3 event): no write.
+	ready := testPhoto
+	ready.Status = StatusReady
+	s, f = newFakeStore(t, func(string, int) (int, string) { return http.StatusOK, getResponse(t, ready) })
+	if err := s.MarkReady(context.Background(), "trip-1", "photo-1", 42); err != nil || len(f.calls) != 1 {
+		t.Fatalf("duplicate: err %v, %d calls", err, len(f.calls))
+	}
+
+	// No record.
+	s, _ = newFakeStore(t, func(string, int) (int, string) { return http.StatusOK, "{}" })
+	if err := s.MarkReady(context.Background(), "trip-1", "photo-1", 42); !errors.Is(err, ErrNotFound) {
+		t.Fatalf("missing: err %v", err)
+	}
+
+	// Lost a race (deleted meanwhile): retryable error, not "not found".
+	s, _ = newFakeStore(t, func(op string, _ int) (int, string) {
+		if op == "GetItem" {
+			return http.StatusOK, getResponse(t, testPhoto)
+		}
+		return http.StatusBadRequest, transactionConditionFailed
+	})
+	if err := s.MarkReady(context.Background(), "trip-1", "photo-1", 42); err == nil || errors.Is(err, ErrNotFound) {
+		t.Fatalf("race: err %v", err)
+	}
+}
+
+const transactionConditionFailed = `{"__type":"com.amazonaws.dynamodb.v20120810#TransactionCanceledException","message":"Transaction cancelled","CancellationReasons":[{"Code":"ConditionalCheckFailed"},{"Code":"None"}]}`
+
+func TestDeletePhoto(t *testing.T) {
+	ready := testPhoto
+	ready.Status = StatusReady
+
+	// Ready: record and listing copy go together.
+	s, f := newFakeStore(t, nil)
+	if err := s.DeletePhoto(context.Background(), ready); err != nil {
+		t.Fatal(err)
+	}
+	items := f.calls[0].Body["TransactItems"].([]any)
+	var sks []string
+	for _, ti := range items {
+		sks = append(sks, str(ti.(map[string]any)["Delete"].(map[string]any)["Key"], "SK"))
+	}
+	if f.calls[0].Op != "TransactWriteItems" || strings.Join(sks, " ") != "PHOTO#photo-1 "+readySK(ready) {
+		t.Fatalf("delete = %s %v", f.calls[0].Op, sks)
+	}
+	s, _ = newFakeStore(t, func(string, int) (int, string) { return http.StatusBadRequest, transactionConditionFailed })
+	if err := s.DeletePhoto(context.Background(), ready); !errors.Is(err, ErrNotFound) {
+		t.Fatalf("ready already gone: err %v", err)
+	}
+
+	// Pending: just the record, only while still pending.
+	s, f = newFakeStore(t, nil)
+	if err := s.DeletePhoto(context.Background(), testPhoto); err != nil {
+		t.Fatal(err)
+	}
+	if b := f.calls[0].Body; f.calls[0].Op != "DeleteItem" || b["ConditionExpression"] != "#s = :pending" || str(b["Key"], "SK") != "PHOTO#photo-1" {
+		t.Fatalf("delete = %+v", f.calls[0])
+	}
+	s, _ = newFakeStore(t, func(string, int) (int, string) { return http.StatusBadRequest, conditionFailed })
+	if err := s.DeletePhoto(context.Background(), testPhoto); err == nil || errors.Is(err, ErrNotFound) {
+		t.Fatalf("pending became ready: err %v", err)
+	}
+}
+
+func TestPutPhotoDuplicateIsError(t *testing.T) {
+	s, _ := newFakeStore(t, func(string, int) (int, string) { return http.StatusBadRequest, conditionFailed })
+	if err := s.PutPhoto(context.Background(), testPhoto); err == nil || errors.Is(err, ErrNotFound) {
+		t.Errorf("PutPhoto err = %v", err)
 	}
 }
 

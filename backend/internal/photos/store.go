@@ -2,9 +2,11 @@ package photos
 
 import (
 	"context"
+	"encoding/base64"
 	"errors"
 	"fmt"
 	"strconv"
+	"strings"
 
 	"github.com/aws/aws-sdk-go-v2/aws"
 	"github.com/aws/aws-sdk-go-v2/feature/dynamodb/attributevalue"
@@ -20,8 +22,15 @@ var ErrNotFound = errors.New("not found")
 //
 //	PK=TRIP#<tripId>  SK=META              the trip
 //	PK=TRIP#<tripId>  SK=MEMBER#<userId>   someone in the trip
-//	PK=TRIP#<tripId>  SK=PHOTO#<photoId>   a photo in the trip
+//	PK=TRIP#<tripId>  SK=PHOTO#<photoId>   a photo in the trip (pending or ready)
+//	PK=TRIP#<tripId>  SK=READY#<order>#<photoId>
+//	                                       listing copy of a ready photo
 //	PK=USER#<userId>  SK=TRIP#<tripId>     "my trips" entry (copy of the trip)
+//
+// Listing a trip's photos queries only the READY# range, so pending records
+// are never read (or paid for) by a list, and the range is already in
+// capture order (see ListOrder), which makes cursor pagination a plain
+// DynamoDB page.
 //
 // The schema is deliberately loose: new attributes can be added to any item
 // without a migration.
@@ -34,11 +43,42 @@ func tripPK(tripID string) string   { return "TRIP#" + tripID }
 func userPK(userID string) string   { return "USER#" + userID }
 func memberSK(userID string) string { return "MEMBER#" + userID }
 func photoSK(photoID string) string { return "PHOTO#" + photoID }
+func readySK(p Photo) string        { return readySKPrefix + ListOrder(p) + "#" + p.ID }
+
+// orderLayout is a fixed-width UTC timestamp, so it sorts lexically.
+const orderLayout = "2006-01-02T15:04:05.000000000Z"
+
+// ListOrder is the sort key of a ready photo in its trip's listing: capture
+// time (UTC); photos without one go last ("~" sorts after digits), by upload
+// time. Ties are broken by id.
+func ListOrder(p Photo) string {
+	if p.TakenAt != nil {
+		return p.TakenAt.UTC().Format(orderLayout)
+	}
+	return "~" + p.CreatedAt.UTC().Format(orderLayout)
+}
+
+// ErrInvalidCursor is returned for a list cursor this store didn't issue.
+var ErrInvalidCursor = fmt.Errorf("%w: invalid cursor", ErrValidation)
+
+// EncodeCursor turns the sort key of the last photo on a page into an opaque
+// cursor.
+func EncodeCursor(sk string) string { return base64.RawURLEncoding.EncodeToString([]byte(sk)) }
+
+// DecodeCursor is the inverse of EncodeCursor; it returns ErrInvalidCursor
+// for anything that isn't a listing sort key.
+func DecodeCursor(c string) (string, error) {
+	b, err := base64.RawURLEncoding.DecodeString(c)
+	if err != nil || len(b) > 512 || !strings.HasPrefix(string(b), readySKPrefix) {
+		return "", ErrInvalidCursor
+	}
+	return string(b), nil
+}
 
 const (
 	metaSK          = "META"
 	tripSKPrefix    = "TRIP#"
-	photoSKPrefix   = "PHOTO#"
+	readySKPrefix   = "READY#"
 	attributeExists = "attribute_exists(PK)"
 	attributeAbsent = "attribute_not_exists(PK)"
 )
@@ -66,9 +106,22 @@ func item(pk, sk, typ string, v any) (map[string]types.AttributeValue, error) {
 	return m, nil
 }
 
+// isConditionFailed reports whether a write (or any item of a transaction)
+// failed its condition expression.
 func isConditionFailed(err error) bool {
 	var ccf *types.ConditionalCheckFailedException
-	return errors.As(err, &ccf)
+	if errors.As(err, &ccf) {
+		return true
+	}
+	var tce *types.TransactionCanceledException
+	if errors.As(err, &tce) {
+		for _, r := range tce.CancellationReasons {
+			if aws.ToString(r.Code) == "ConditionalCheckFailed" {
+				return true
+			}
+		}
+	}
+	return false
 }
 
 // CreateTrip writes the trip, makes its creator a member and adds it to the
@@ -105,7 +158,7 @@ func (s *DynamoStore) CreateTrip(ctx context.Context, t Trip) error {
 // ListTrips returns the trips userID belongs to.
 func (s *DynamoStore) ListTrips(ctx context.Context, userID string) ([]Trip, error) {
 	var out []Trip
-	err := s.query(ctx, userPK(userID), tripSKPrefix, "", func(items []map[string]types.AttributeValue) error {
+	err := s.query(ctx, userPK(userID), tripSKPrefix, func(items []map[string]types.AttributeValue) error {
 		var batch []Trip
 		if err := attributevalue.UnmarshalListOfMaps(items, &batch); err != nil {
 			return fmt.Errorf("unmarshal trips: %w", err)
@@ -157,28 +210,73 @@ func (s *DynamoStore) GetPhoto(ctx context.Context, tripID, id string) (Photo, e
 	return p, err
 }
 
-// ListReadyPhotos returns the trip's photos whose status is "ready".
-func (s *DynamoStore) ListReadyPhotos(ctx context.Context, tripID string) ([]Photo, error) {
-	var out []Photo
-	err := s.query(ctx, tripPK(tripID), photoSKPrefix, StatusReady, func(items []map[string]types.AttributeValue) error {
-		var batch []Photo
-		if err := attributevalue.UnmarshalListOfMaps(items, &batch); err != nil {
-			return fmt.Errorf("unmarshal photos: %w", err)
+// ListReadyPhotos returns up to limit of the trip's ready photos in
+// ListOrder, starting after cursor ("" for the first page). next is "" when
+// there are no further photos; a non-empty next can still lead to an empty
+// last page. A malformed cursor returns ErrInvalidCursor.
+func (s *DynamoStore) ListReadyPhotos(ctx context.Context, tripID string, limit int, cursor string) (out []Photo, next string, err error) {
+	in := &dynamodb.QueryInput{
+		TableName:              &s.Table,
+		KeyConditionExpression: aws.String("PK = :pk AND begins_with(SK, :sk)"),
+		ExpressionAttributeValues: map[string]types.AttributeValue{
+			":pk": &types.AttributeValueMemberS{Value: tripPK(tripID)},
+			":sk": &types.AttributeValueMemberS{Value: readySKPrefix},
+		},
+		Limit: aws.Int32(int32(limit)),
+	}
+	if cursor != "" {
+		sk, err := DecodeCursor(cursor)
+		if err != nil {
+			return nil, "", err
 		}
-		out = append(out, batch...)
-		return nil
-	})
-	return out, err
+		in.ExclusiveStartKey = key(tripPK(tripID), sk)
+	}
+	res, err := s.Client.Query(ctx, in)
+	if err != nil {
+		return nil, "", fmt.Errorf("query photos: %w", err)
+	}
+	if err := attributevalue.UnmarshalListOfMaps(res.Items, &out); err != nil {
+		return nil, "", fmt.Errorf("unmarshal photos: %w", err)
+	}
+	if sk, ok := res.LastEvaluatedKey["SK"].(*types.AttributeValueMemberS); ok {
+		next = EncodeCursor(sk.Value)
+	}
+	return out, next, nil
 }
 
-// DeletePhoto removes a photo record. It returns ErrNotFound if it doesn't exist.
-func (s *DynamoStore) DeletePhoto(ctx context.Context, tripID, id string) error {
+// errChanged means a photo changed between being read and being written; the
+// caller should re-read and retry.
+var errChanged = errors.New("photo changed concurrently")
+
+// DeletePhoto removes a photo record and, for a ready photo, its listing
+// copy. p is the record as returned by GetPhoto. It returns ErrNotFound if a
+// ready photo no longer exists, and an error (retryable) if a pending photo
+// became ready or disappeared since it was read.
+func (s *DynamoStore) DeletePhoto(ctx context.Context, p Photo) error {
+	pk := tripPK(p.TripID)
+	if p.Status == StatusReady {
+		_, err := s.Client.TransactWriteItems(ctx, &dynamodb.TransactWriteItemsInput{
+			TransactItems: []types.TransactWriteItem{
+				{Delete: &types.Delete{TableName: &s.Table, Key: key(pk, photoSK(p.ID)), ConditionExpression: aws.String(attributeExists)}},
+				{Delete: &types.Delete{TableName: &s.Table, Key: key(pk, readySK(p))}},
+			},
+		})
+		if isConditionFailed(err) {
+			return ErrNotFound
+		}
+		if err != nil {
+			return fmt.Errorf("delete photo: %w", err)
+		}
+		return nil
+	}
 	_, err := s.Client.DeleteItem(ctx, &dynamodb.DeleteItemInput{
-		TableName: &s.Table, Key: key(tripPK(tripID), photoSK(id)),
-		ConditionExpression: aws.String(attributeExists),
+		TableName: &s.Table, Key: key(pk, photoSK(p.ID)),
+		ConditionExpression:       aws.String("#s = :pending"),
+		ExpressionAttributeNames:  map[string]string{"#s": "status"},
+		ExpressionAttributeValues: map[string]types.AttributeValue{":pending": &types.AttributeValueMemberS{Value: StatusPending}},
 	})
 	if isConditionFailed(err) {
-		return ErrNotFound
+		return fmt.Errorf("delete pending photo: %w", errChanged)
 	}
 	if err != nil {
 		return fmt.Errorf("delete photo: %w", err)
@@ -186,22 +284,44 @@ func (s *DynamoStore) DeletePhoto(ctx context.Context, tripID, id string) error 
 	return nil
 }
 
-// MarkReady flips an existing photo to "ready" and records the object size.
-// It returns ErrNotFound if no record exists for (tripID, id).
+// MarkReady flips a pending photo to "ready", records the object size and
+// adds its listing copy, atomically. It returns ErrNotFound if no record
+// exists for (tripID, id), and nil if the photo is already ready (S3 can
+// deliver an event more than once).
 func (s *DynamoStore) MarkReady(ctx context.Context, tripID, id string, size int64) error {
-	_, err := s.Client.UpdateItem(ctx, &dynamodb.UpdateItemInput{
-		TableName:                &s.Table,
-		Key:                      key(tripPK(tripID), photoSK(id)),
-		UpdateExpression:         aws.String("SET #s = :ready, #sz = :size"),
-		ConditionExpression:      aws.String(attributeExists),
-		ExpressionAttributeNames: map[string]string{"#s": "status", "#sz": "size"},
-		ExpressionAttributeValues: map[string]types.AttributeValue{
-			":ready": &types.AttributeValueMemberS{Value: StatusReady},
-			":size":  &types.AttributeValueMemberN{Value: strconv.FormatInt(size, 10)},
+	var p Photo
+	if err := s.get(ctx, tripPK(tripID), photoSK(id), &p); err != nil {
+		return err
+	}
+	if p.Status == StatusReady {
+		return nil
+	}
+	p.Status, p.Size = StatusReady, size
+	listing, err := item(tripPK(tripID), readySK(p), "readyPhoto", p)
+	if err != nil {
+		return err
+	}
+	_, err = s.Client.TransactWriteItems(ctx, &dynamodb.TransactWriteItemsInput{
+		TransactItems: []types.TransactWriteItem{
+			{Update: &types.Update{
+				TableName:                &s.Table,
+				Key:                      key(tripPK(tripID), photoSK(id)),
+				UpdateExpression:         aws.String("SET #s = :ready, #sz = :size"),
+				ConditionExpression:      aws.String("#s = :pending"),
+				ExpressionAttributeNames: map[string]string{"#s": "status", "#sz": "size"},
+				ExpressionAttributeValues: map[string]types.AttributeValue{
+					":ready":   &types.AttributeValueMemberS{Value: StatusReady},
+					":pending": &types.AttributeValueMemberS{Value: StatusPending},
+					":size":    &types.AttributeValueMemberN{Value: strconv.FormatInt(size, 10)},
+				},
+			}},
+			{Put: &types.Put{TableName: &s.Table, Item: listing}},
 		},
 	})
 	if isConditionFailed(err) {
-		return ErrNotFound
+		// Deleted or marked ready since we read it: the processor's retry
+		// re-reads the record and settles it.
+		return fmt.Errorf("mark ready: %w", errChanged)
 	}
 	if err != nil {
 		return fmt.Errorf("mark ready: %w", err)
@@ -223,9 +343,8 @@ func (s *DynamoStore) get(ctx context.Context, pk, sk string, out any) error {
 	return nil
 }
 
-// query pages through items under pk whose SK starts with skPrefix, optionally
-// keeping only those with the given status.
-func (s *DynamoStore) query(ctx context.Context, pk, skPrefix, status string, each func([]map[string]types.AttributeValue) error) error {
+// query pages through all items under pk whose SK starts with skPrefix.
+func (s *DynamoStore) query(ctx context.Context, pk, skPrefix string, each func([]map[string]types.AttributeValue) error) error {
 	in := &dynamodb.QueryInput{
 		TableName:              &s.Table,
 		KeyConditionExpression: aws.String("PK = :pk AND begins_with(SK, :sk)"),
@@ -233,11 +352,6 @@ func (s *DynamoStore) query(ctx context.Context, pk, skPrefix, status string, ea
 			":pk": &types.AttributeValueMemberS{Value: pk},
 			":sk": &types.AttributeValueMemberS{Value: skPrefix},
 		},
-	}
-	if status != "" {
-		in.FilterExpression = aws.String("#s = :status")
-		in.ExpressionAttributeNames = map[string]string{"#s": "status"}
-		in.ExpressionAttributeValues[":status"] = &types.AttributeValueMemberS{Value: status}
 	}
 	p := dynamodb.NewQueryPaginator(s.Client, in)
 	for p.HasMorePages() {

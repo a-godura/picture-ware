@@ -259,6 +259,22 @@ paths:
         Only photos with status `ready`, in capture order (`takenAt`); photos
         without a `takenAt` come last, by `createdAt`. `imageUrl` is a
         presigned GET valid for about an hour.
+
+        Paginated: pass the previous response's `nextCursor` as `cursor` to
+        get the next page, until `nextCursor` is null. The order holds across
+        pages. A page may be shorter than `limit` (even empty) while
+        `nextCursor` is still set.
+      parameters:
+        - name: limit
+          in: query
+          required: false
+          description: Page size.
+          schema: { type: integer, minimum: 1, maximum: 500, default: 200 }
+        - name: cursor
+          in: query
+          required: false
+          description: Opaque `nextCursor` from the previous page. Omit for the first page.
+          schema: { type: string }
       responses:
         "200":
           description: OK
@@ -305,6 +321,26 @@ paths:
                         createdAt: "2026-10-02T22:10:09Z"
                         uploaderId: 2c4d8e10-a0b1-70c2-9d3e-5f6a7b8c9d0e
                         imageUrl: https://picture-ware-photosbucket-example.s3.us-east-2.amazonaws.com/trips/ce9f9b98-5813-4fa3-98ce-282743afbfa0/1c6042c1-f894-4169-9b3b-bb443e9174fe?X-Amz-Signature=example
+                    nextCursor: null
+                firstPage:
+                  summary: The same Lisbon trip fetched with ?limit=2 (more pages follow)
+                  value:
+                    photos:
+                      - id: ada86959-19c4-4bd8-9579-ba3eea50743c
+                        lat: 38.6916
+                        lng: -9.216
+                        takenAt: "2026-10-01T15:20:11Z"
+                        createdAt: "2026-10-01T15:22:40Z"
+                        uploaderId: 511b25d0-40a1-705d-f49c-7e89f72c4924
+                        imageUrl: https://picture-ware-photosbucket-example.s3.us-east-2.amazonaws.com/trips/ce9f9b98-5813-4fa3-98ce-282743afbfa0/ada86959-19c4-4bd8-9579-ba3eea50743c?X-Amz-Signature=example
+                      - id: 74c3a091-f598-46ef-9c97-4dcd4b162db5
+                        lat: 38.7075
+                        lng: -9.1364
+                        takenAt: "2026-10-01T18:47:03Z"
+                        createdAt: "2026-10-02T08:01:15Z"
+                        uploaderId: 2c4d8e10-a0b1-70c2-9d3e-5f6a7b8c9d0e
+                        imageUrl: https://picture-ware-photosbucket-example.s3.us-east-2.amazonaws.com/trips/ce9f9b98-5813-4fa3-98ce-282743afbfa0/74c3a091-f598-46ef-9c97-4dcd4b162db5?X-Amz-Signature=example
+                    nextCursor: UkVBRFkjMjAyNi0xMC0wMVQxODo0NzowMy4wMDAwMDAwMDBaIzc0YzNhMDkxLWY1OTgtNDZlZi05Yzk3LTRkY2Q0YjE2MmRiNQ
                 pastTrip:
                   summary: Iceland trip, two members' photos far apart
                   value:
@@ -323,9 +359,20 @@ paths:
                         createdAt: "2026-06-25T10:03:12Z"
                         uploaderId: 511b25d0-40a1-705d-f49c-7e89f72c4924
                         imageUrl: https://picture-ware-photosbucket-example.s3.us-east-2.amazonaws.com/trips/dfb1c221-bcab-4bf8-b560-1ddd49767cf6/8d39edbf-7cd4-4f15-b814-e7e5b70bb71b?X-Amz-Signature=example
+                    nextCursor: null
                 empty:
                   summary: Trip with no photos yet
-                  value: { photos: [] }
+                  value: { photos: [], nextCursor: null }
+        "400":
+          description: Invalid `limit` or `cursor`
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Error" }
+              examples:
+                badLimit:
+                  value: { error: limit must be an integer from 1 to 500 }
+                badCursor:
+                  value: { error: invalid cursor }
         "401": { $ref: "#/components/responses/Unauthorized" }
         "404": { $ref: "#/components/responses/TripNotFound" }
         "429": { $ref: "#/components/responses/Throttled" }
@@ -531,11 +578,15 @@ components:
     TripPhotoList:
       type: object
       additionalProperties: false
-      required: [photos]
+      required: [photos, nextCursor]
       properties:
         photos:
           type: array
           items: { $ref: "#/components/schemas/TripPhoto" }
+        nextCursor:
+          type: string
+          nullable: true
+          description: Pass as `cursor` to get the next page; null on the last page.
 
     Error:
       type: object

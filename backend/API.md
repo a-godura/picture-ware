@@ -230,9 +230,10 @@ oversized files (S3 may also just reset the connection).
       "takenAt": "2026-09-01T10:00:00Z",
       "createdAt": "2026-10-01T18:00:00Z",
       "uploaderId": "<sub>",
-      "imageUrl": "https://<bucket>.s3.us-east-2.amazonaws.com/photos/…?X-Amz-…"
+      "imageUrl": "https://<bucket>.s3.us-east-2.amazonaws.com/trips/…?X-Amz-…"
     }
-  ]
+  ],
+  "nextCursor": null
 }
 ```
 
@@ -244,8 +245,12 @@ oversized files (S3 may also just reset the connection).
 - `imageUrl` is a presigned GET valid for **1 hour** (it is signed with the
   Lambda's temporary credentials, so in rare cases it can expire sooner if
   those credentials rotate). Re-fetch the list rather than caching URLs.
-- No pagination yet (one DynamoDB Query on the trip's partition).
-- Errors: `401` (see Authentication), `404`, `429`, `500`.
+- Paginated: `?limit=` (1-500, default 200). While `nextCursor` is a
+  string, pass it back as `?cursor=` for the next page; it is `null` on the
+  last page. The order holds across pages; a page can be shorter than
+  `limit` (even empty) while `nextCursor` is set.
+- Errors: `400` (bad `limit` or `cursor`), `401` (see Authentication),
+  `404`, `429`, `500`.
 
 ## `DELETE /trips/{tripId}/photos/{photoId}`
 

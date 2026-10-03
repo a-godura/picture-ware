@@ -28,7 +28,7 @@ import (
 )
 
 const (
-	specFile     = "api/openapi.yaml"     // relative to the repo root
+	specFile     = "api/openapi.yaml"      // relative to the repo root
 	templateFile = "backend/template.yaml" // relative to the repo root
 )
 

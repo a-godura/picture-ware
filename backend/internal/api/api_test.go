@@ -5,7 +5,9 @@ import (
 	"encoding/base64"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"net/http"
+	"sort"
 	"strings"
 	"testing"
 	"time"
@@ -25,6 +27,7 @@ type fakeStore struct {
 	err       error // returned by every method when set
 	memberErr error
 	deleted   []string
+	lastLimit int
 }
 
 func newStore() *fakeStore {
@@ -98,20 +101,40 @@ func (f *fakeStore) GetPhoto(_ context.Context, tripID, id string) (photos.Photo
 	return p, nil
 }
 
-func (f *fakeStore) ListReadyPhotos(_ context.Context, tripID string) ([]photos.Photo, error) {
-	var out []photos.Photo
-	for _, p := range f.photos {
-		if p.TripID == tripID && p.Status == photos.StatusReady {
-			out = append(out, p)
+// ListReadyPhotos pages like DynamoStore: ready photos sorted by listing key,
+// cursor = encoded key of the last photo returned.
+func (f *fakeStore) ListReadyPhotos(_ context.Context, tripID string, limit int, cursor string) ([]photos.Photo, string, error) {
+	f.lastLimit = limit
+	if f.err != nil {
+		return nil, "", f.err
+	}
+	sortKey := func(p photos.Photo) string { return "READY#" + photos.ListOrder(p) + "#" + p.ID }
+	var after string
+	if cursor != "" {
+		var err error
+		if after, err = photos.DecodeCursor(cursor); err != nil {
+			return nil, "", err
 		}
 	}
-	return out, f.err
+	var all []photos.Photo
+	for _, p := range f.photos {
+		if p.TripID == tripID && p.Status == photos.StatusReady && sortKey(p) > after {
+			all = append(all, p)
+		}
+	}
+	sort.Slice(all, func(i, j int) bool { return sortKey(all[i]) < sortKey(all[j]) })
+	if len(all) <= limit {
+		return all, "", nil
+	}
+	page := all[:limit]
+	return page, photos.EncodeCursor(sortKey(page[limit-1])), nil
 }
 
-func (f *fakeStore) DeletePhoto(_ context.Context, tripID, id string) error {
+func (f *fakeStore) DeletePhoto(_ context.Context, p photos.Photo) error {
 	if f.err != nil {
 		return f.err
 	}
+	tripID, id := p.TripID, p.ID
 	if _, ok := f.photos[tripID+"/"+id]; !ok {
 		return photos.ErrNotFound
 	}
@@ -430,6 +453,69 @@ func TestListPhotos(t *testing.T) {
 	if !strings.Contains(empty.Body, `"photos":[]`) {
 		t.Fatalf("empty body = %s", empty.Body)
 	}
+}
+
+func TestListPhotosPagination(t *testing.T) {
+	s := newStore().withTrip(tripID, testUser)
+	var want []string
+	for i := range 5 {
+		taken := fixedNow.Add(time.Duration(i) * time.Minute)
+		id := fmt.Sprintf("p%d", i)
+		want = append(want, id)
+		s.withPhoto(photos.Photo{TripID: tripID, ID: id, UploaderID: testUser, TakenAt: &taken, CreatedAt: fixedNow, Status: photos.StatusReady})
+	}
+	s.withPhoto(photos.Photo{TripID: tripID, ID: "pending", UploaderID: testUser, Status: photos.StatusPending})
+	hs := newHarness(s)
+	list := func(query map[string]string) (ListResponse, events.APIGatewayV2HTTPResponse) {
+		req := inTrip("GET /trips/{tripId}/photos", testUser, tripID, nil)
+		req.QueryStringParameters = query
+		resp := hs.do(t, req)
+		var got ListResponse
+		if resp.StatusCode == http.StatusOK {
+			if err := json.Unmarshal([]byte(resp.Body), &got); err != nil {
+				t.Fatal(err)
+			}
+		}
+		return got, resp
+	}
+
+	// Default page size; one page, null cursor.
+	got, resp := list(nil)
+	expectStatus(t, resp, http.StatusOK)
+	if s.lastLimit != DefaultPageSize || len(got.Photos) != 5 || got.NextCursor != nil || !strings.Contains(resp.Body, `"nextCursor":null`) {
+		t.Fatalf("limit %d, body %s", s.lastLimit, resp.Body)
+	}
+
+	// Walk pages of 2: 2 + 2 + 1, order kept across pages.
+	var ids []string
+	query := map[string]string{"limit": "2"}
+	for pages := 0; ; pages++ {
+		if pages > 5 {
+			t.Fatal("pagination doesn't end")
+		}
+		got, resp := list(query)
+		expectStatus(t, resp, http.StatusOK)
+		for _, p := range got.Photos {
+			ids = append(ids, p.ID)
+		}
+		if got.NextCursor == nil {
+			break
+		}
+		query = map[string]string{"limit": "2", "cursor": *got.NextCursor}
+	}
+	if strings.Join(ids, ",") != strings.Join(want, ",") {
+		t.Fatalf("paged ids = %v, want %v", ids, want)
+	}
+
+	for _, q := range []map[string]string{
+		{"limit": "0"}, {"limit": "501"}, {"limit": "ten"}, {"limit": ""},
+		{"cursor": "not base64!"}, {"cursor": photos.EncodeCursor("MEMBER#" + testUser)},
+	} {
+		_, resp := list(q)
+		expectStatus(t, resp, http.StatusBadRequest)
+	}
+	_, resp = list(map[string]string{"limit": "500"})
+	expectStatus(t, resp, http.StatusOK)
 }
 
 func TestDeletePhoto(t *testing.T) {
