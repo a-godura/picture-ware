@@ -7,7 +7,12 @@
 #   marks it ready -> GET /trips/{id}/photos lists it -> imageUrl downloads the
 #   same bytes; B (not a member) gets 404 for the trip and its photos and
 #   doesn't see it in GET /trips; wrong Content-Type and oversized uploads are
-#   rejected by S3; delete rules hold.
+#   rejected by S3; delete rules hold; members: A shares an invite link (the
+#   public landing page opens the app), display names via PATCH /me, B
+#   previews and joins with the code,
+#   sees A's photos, leaves, rejoins, is removed by A (which rotates the
+#   invite, so B's old code stops working); the owner can't leave; a rotated
+#   code stops working.
 # Test trips (all their items and objects) and both users are deleted on exit. Passwords and
 # tokens are generated/held in a private temp dir and never printed.
 set -euo pipefail
@@ -20,8 +25,10 @@ HERE="$(cd "$(dirname "$0")" && pwd)"
 IMG="$HERE/testdata/tiny.jpg"
 umask 077
 TMP="$(mktemp -d)"
-TRIPS=() # "<tripId>/<creatorSub>" of created trips
-USERS=() # Cognito usernames to delete
+TRIPS=()   # "<tripId>/<creatorSub>" of created trips
+USERS=()   # Cognito usernames to delete
+SUBS=()    # their subs (for "my trips" entries left by joining)
+INVITES=() # invite codes handed out
 
 for bin in aws curl jq cmp openssl; do command -v "$bin" >/dev/null || { echo "missing $bin" >&2; exit 1; }; done
 
@@ -38,7 +45,7 @@ delete_key() {
 }
 
 cleanup() {
-  local t trip creator sk
+  local t trip creator sk sub code
   for t in "${TRIPS[@]+"${TRIPS[@]}"}"; do
     trip="${t%%/*}"; creator="${t#*/}"
     for sk in $("${AWS[@]}" dynamodb query --table-name "$TABLE" \
@@ -48,8 +55,11 @@ cleanup() {
       delete_key "TRIP#$trip" "$sk"
     done
     delete_key "USER#$creator" "TRIP#$trip"
+    for sub in "${SUBS[@]+"${SUBS[@]}"}"; do delete_key "USER#$sub" "TRIP#$trip"; done
     "${AWS[@]}" s3 rm "s3://$BUCKET/trips/$trip/" --recursive >/dev/null 2>&1 || true
   done
+  for code in "${INVITES[@]+"${INVITES[@]}"}"; do delete_key "INVITE#$code" META; done
+  for sub in "${SUBS[@]+"${SUBS[@]}"}"; do delete_key "USER#$sub" PROFILE; done
   for u in "${USERS[@]+"${USERS[@]}"}"; do
     "${AWS[@]}" cognito-idp admin-delete-user --user-pool-id "$POOL" --username "$u" >/dev/null || true
   done
@@ -71,7 +81,7 @@ new_user() {
   SUB="$("${AWS[@]}" cognito-idp admin-create-user --user-pool-id "$POOL" --username "$email" \
     --message-action SUPPRESS --user-attributes Name=email,Value="$email" Name=email_verified,Value=true \
     --query "User.Attributes[?Name=='sub'].Value | [0]" --output text)"
-  USERS+=("$email")
+  USERS+=("$email"); SUBS+=("$SUB")
   # Secrets go through --cli-input-json files so they never appear in argv.
   jq -n --arg p "$POOL" --arg u "$email" --arg pw "$pw" \
     '{UserPoolId:$p, Username:$u, Password:$pw, Permanent:true}' > "$TMP/$name.setpw.json"
@@ -258,5 +268,127 @@ pass "A: DELETE photo -> 204, object gone, not listed"
 del "$TMP/a.auth" "$A_TRIP" "$A_ID"
 [ "$STATUS" = 404 ] || fail "repeat DELETE -> $STATUS"
 pass "A: repeat DELETE -> 404"
+
+# 9. Members and invites
+# wait_listed AUTHFILE TRIP ID -> waits until the photo is listed in the trip
+wait_listed() {
+  for _ in $(seq 1 20); do
+    api GET "$1" "/trips/$2/photos"
+    [ "$STATUS" = 200 ] || fail "GET /trips/$2/photos -> $STATUS"
+    jq -e --arg id "$3" 'any(.photos[]; .id == $id)' "$TMP/resp.json" >/dev/null && return 0
+    sleep 1.5
+  done
+  fail "photo $3 never appeared in trip $2"
+}
+create_photo "$TMP/a.auth" "$A_TRIP"; A_ID="$ID"
+upload "$IMG"
+[ "$STATUS" = 204 ] || fail "upload -> $STATUS"
+wait_listed "$TMP/a.auth" "$A_TRIP" "$A_ID"
+pass "A: uploaded another photo $A_ID"
+
+api POST "$TMP/a.auth" "/trips/$A_TRIP/invite"
+[ "$STATUS" = 200 ] || fail "A: POST invite -> $STATUS $(cat "$TMP/resp.json")"
+CODE="$(jq -r .code "$TMP/resp.json")"; INVITES+=("$CODE")
+LINK="$(jq -r .url "$TMP/resp.json")"
+[[ "$CODE" =~ ^[a-z2-7]{26}$ ]] || fail "invite code $CODE malformed"
+[ "$LINK" = "$API/j/$CODE" ] || fail "invite url $LINK"
+[ "$(jq -r .appUrl "$TMP/resp.json")" = "picture-ware://join/$CODE" ] || fail "invite appUrl"
+api POST "$TMP/a.auth" "/trips/$A_TRIP/invite"
+[ "$STATUS" = 200 ] && [ "$(jq -r .code "$TMP/resp.json")" = "$CODE" ] || fail "second POST invite changed the code"
+pass "A: POST /trips/{id}/invite -> 200, same code on repeat, url=<api>/j/<code>"
+
+STATUS="$(curl -sS -o "$TMP/landing.html" -D "$TMP/landing.h" -w '%{http_code}' "$LINK")"
+[ "$STATUS" = 200 ] && grep -qi '^content-type: text/html' "$TMP/landing.h" \
+  && grep -q "picture-ware://join/$CODE" "$TMP/landing.html" || fail "landing page -> $STATUS"
+grep -q "Smoke test trip" "$TMP/landing.html" && fail "landing page leaks the trip name"
+pass "GET /j/<code> without a token -> 200 text/html with the app link, no trip data"
+STATUS="$(curl -sS -o /dev/null -w '%{http_code}' "$API/j/not-a-code")"
+[ "$STATUS" = 404 ] || fail "malformed landing code -> $STATUS"
+pass "GET /j/not-a-code -> 404"
+
+api GET "$TMP/b.auth" "/invites/$CODE"
+[ "$STATUS" = 200 ] || fail "B: preview -> $STATUS $(cat "$TMP/resp.json")"
+jq -e --arg t "$A_TRIP" '.trip.id == $t and .memberCount == 1 and .alreadyMember == false and .ownerName == null' \
+  "$TMP/resp.json" >/dev/null || fail "B: preview body $(cat "$TMP/resp.json")"
+pass "B: GET /invites/{code} -> 200, ownerName null (A hasn't chosen a name) $(jq -c 'del(.code)' "$TMP/resp.json")"
+
+# Display names: chosen via PATCH /me, never derived from email.
+api GET "$TMP/a.auth" /me
+[ "$STATUS" = 200 ] && jq -e --arg s "$SUB_A" '.userId == $s and .displayName == null' "$TMP/resp.json" >/dev/null || fail "A: GET /me -> $STATUS $(cat "$TMP/resp.json")"
+api PATCH "$TMP/a.auth" /me '{"displayName":"   "}'
+[ "$STATUS" = 400 ] || fail "A: blank displayName -> $STATUS"
+api PATCH "$TMP/a.auth" /me '{"displayName":"  Smoke A  "}'
+[ "$STATUS" = 200 ] && jq -e '.displayName == "Smoke A"' "$TMP/resp.json" >/dev/null || fail "A: PATCH /me -> $STATUS $(cat "$TMP/resp.json")"
+api GET "$TMP/b.auth" "/invites/$CODE"
+jq -e '.ownerName == "Smoke A"' "$TMP/resp.json" >/dev/null || fail "preview ownerName after naming: $(cat "$TMP/resp.json")"
+pass "A: GET /me -> null name; PATCH /me blank -> 400, \"  Smoke A  \" -> 200 trimmed; preview shows it"
+
+accept() { api POST "$1" "/invites/$2/accept"; }
+accept "$TMP/b.auth" "$CODE"
+[ "$STATUS" = 200 ] && jq -e --arg t "$A_TRIP" '.id == $t' "$TMP/resp.json" >/dev/null || fail "B: accept -> $STATUS $(cat "$TMP/resp.json")"
+accept "$TMP/b.auth" "$CODE"
+[ "$STATUS" = 200 ] || fail "B: repeat accept -> $STATUS"
+pass "B: POST /invites/{code}/accept -> 200 (and again -> 200)"
+api GET "$TMP/b.auth" /trips
+jq -e --arg t "$A_TRIP" 'any(.trips[]; .id == $t)' "$TMP/resp.json" >/dev/null || fail "B doesn't list A's trip after joining"
+wait_listed "$TMP/b.auth" "$A_TRIP" "$A_ID"
+pass "B: A's trip is in GET /trips and B sees A's photo"
+
+api GET "$TMP/b.auth" "/trips/$A_TRIP/members"
+[ "$STATUS" = 200 ] || fail "B: members -> $STATUS"
+jq -e --arg a "$SUB_A" --arg b "$SUB_B" '[.members[] | .userId + ":" + .role] == [$a + ":owner", $b + ":member"]' \
+  "$TMP/resp.json" >/dev/null || fail "members $(cat "$TMP/resp.json")"
+jq -e '[.members[].name] == ["Smoke A", null]' "$TMP/resp.json" >/dev/null || fail "member names $(cat "$TMP/resp.json")"
+api PATCH "$TMP/b.auth" /me '{"displayName":"Smoke B"}'
+[ "$STATUS" = 200 ] || fail "B: PATCH /me -> $STATUS"
+api GET "$TMP/a.auth" "/trips/$A_TRIP/members"
+jq -e '[.members[].name] == ["Smoke A", "Smoke B"]' "$TMP/resp.json" >/dev/null || fail "member names after B named: $(cat "$TMP/resp.json")"
+pass "GET /trips/{id}/members -> owner A, member B; names are the chosen ones (null until set)"
+
+api POST "$TMP/b.auth" "/trips/$A_TRIP/invite"
+[ "$STATUS" = 200 ] && [ "$(jq -r .code "$TMP/resp.json")" = "$CODE" ] || fail "B: POST invite -> $STATUS"
+pass "B (member): POST invite -> 200, the same link to share"
+api POST "$TMP/b.auth" "/trips/$A_TRIP/invite/rotate"
+[ "$STATUS" = 403 ] || fail "B: rotate -> $STATUS"
+pass "B (member): rotate -> 403"
+
+member_del() { api DELETE "$1" "/trips/$A_TRIP/members/$2"; }
+member_del "$TMP/b.auth" "$SUB_B"
+[ "$STATUS" = 204 ] || fail "B: leave -> $STATUS $(cat "$TMP/resp.json")"
+api GET "$TMP/b.auth" "/trips/$A_TRIP/photos"
+[ "$STATUS" = 404 ] || fail "B after leaving: photos -> $STATUS"
+api GET "$TMP/b.auth" /trips
+jq -e --arg t "$A_TRIP" 'all(.trips[]; .id != $t)' "$TMP/resp.json" >/dev/null || fail "B still lists A's trip"
+pass "B: leave -> 204, then A's trip is 404 and not listed"
+
+accept "$TMP/b.auth" "$CODE"
+[ "$STATUS" = 200 ] || fail "B: rejoin -> $STATUS"
+member_del "$TMP/a.auth" "$SUB_B"
+[ "$STATUS" = 204 ] || fail "A: remove B -> $STATUS $(cat "$TMP/resp.json")"
+api GET "$TMP/b.auth" "/trips/$A_TRIP/photos"
+[ "$STATUS" = 404 ] || fail "B after removal: photos -> $STATUS"
+pass "B rejoins; A removes B -> 204; B gets 404"
+accept "$TMP/b.auth" "$CODE"
+[ "$STATUS" = 404 ] || fail "B rejoining with the pre-removal code -> $STATUS"
+api POST "$TMP/a.auth" "/trips/$A_TRIP/invite"
+CODE="$(jq -r .code "$TMP/resp.json")"; INVITES+=("$CODE")
+[ "$STATUS" = 200 ] && [ "$CODE" != "${INVITES[0]}" ] || fail "removal didn't rotate the invite ($STATUS)"
+pass "removal rotated the invite: B's old code -> 404, A gets a new code"
+member_del "$TMP/a.auth" "$SUB_A"
+[ "$STATUS" = 409 ] || fail "A: leave own trip -> $STATUS"
+pass "A (owner): leave -> 409 $(jq -c . "$TMP/resp.json")"
+
+api POST "$TMP/a.auth" "/trips/$A_TRIP/invite/rotate"
+[ "$STATUS" = 201 ] || fail "A: rotate -> $STATUS $(cat "$TMP/resp.json")"
+NEW_CODE="$(jq -r .code "$TMP/resp.json")"; INVITES+=("$NEW_CODE")
+[ "$NEW_CODE" != "$CODE" ] || fail "rotate kept the code"
+api GET "$TMP/b.auth" "/invites/$CODE"
+[ "$STATUS" = 404 ] || fail "preview rotated code -> $STATUS"
+accept "$TMP/b.auth" "$CODE"
+[ "$STATUS" = 404 ] || fail "accept rotated code -> $STATUS"
+pass "A: rotate -> 201 new code; old code preview/accept -> 404"
+accept "$TMP/b.auth" "$NEW_CODE"
+[ "$STATUS" = 200 ] || fail "B: accept new code -> $STATUS"
+pass "B: accept new code -> 200"
 
 echo "smoke test passed"

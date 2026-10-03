@@ -24,6 +24,12 @@ type fakeStore struct {
 	members map[string]bool // "tripID/userID"
 	photos  map[string]photos.Photo
 
+	memberInfo map[string]photos.Member // "tripID/userID", set by CreateTrip/AddMember
+	invites    map[string]photos.Invite // by code
+	profiles   map[string]photos.Profile
+	raceInvite *photos.Invite // PutInvite: someone else's invite lands first, once
+	removeRace *photos.Invite // RemoveMember: someone rotates the invite first, once
+
 	err       error // returned by every method when set
 	memberErr error
 	deleted   []string
@@ -48,12 +54,14 @@ func (f *fakeStore) withPhoto(p photos.Photo) *fakeStore {
 	return f
 }
 
-func (f *fakeStore) CreateTrip(_ context.Context, t photos.Trip) error {
+func (f *fakeStore) CreateTrip(_ context.Context, t photos.Trip, owner photos.Member) error {
 	if f.err != nil {
 		return f.err
 	}
+	t.MemberCount = 1
 	f.trips[t.ID] = t
-	f.members[t.ID+"/"+t.CreatedBy] = true
+	f.members[t.ID+"/"+owner.UserID] = true
+	f.info()[t.ID+"/"+owner.UserID] = owner
 	return nil
 }
 
@@ -205,12 +213,16 @@ type harness struct {
 	store   *fakeStore
 	presign *fakePresigner
 	objects *fakeObjects
+	codes   int // invite codes handed out
 	h       *Handler
 }
 
 func newHarness(s *fakeStore) *harness {
 	hs := &harness{store: s, presign: &fakePresigner{}, objects: &fakeObjects{}}
-	hs.h = &Handler{Store: s, Presigner: hs.presign, Objects: hs.objects, NewID: func() string { return "id-1" }, Now: func() time.Time { return fixedNow }}
+	hs.h = &Handler{
+		Store: s, Presigner: hs.presign, Objects: hs.objects,
+		NewID: func() string { return "id-1" }, NewCode: hs.newCode, Now: func() time.Time { return fixedNow },
+	}
 	return hs
 }
 

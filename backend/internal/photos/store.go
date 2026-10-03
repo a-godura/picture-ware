@@ -26,6 +26,7 @@ var ErrNotFound = errors.New("not found")
 //	PK=TRIP#<tripId>  SK=READY#<order>#<photoId>
 //	                                       listing copy of a ready photo
 //	PK=USER#<userId>  SK=TRIP#<tripId>     "my trips" entry (copy of the trip)
+//	PK=INVITE#<code>  SK=META              a trip's active invite link
 //
 // Listing a trip's photos queries only the READY# range, so pending records
 // are never read (or paid for) by a list, and the range is already in
@@ -124,20 +125,19 @@ func isConditionFailed(err error) bool {
 	return false
 }
 
-// CreateTrip writes the trip, makes its creator a member and adds it to the
-// creator's trip list, all or nothing.
-func (s *DynamoStore) CreateTrip(ctx context.Context, t Trip) error {
+// CreateTrip writes the trip, makes its creator (owner) a member and adds it
+// to the creator's trip list, all or nothing.
+func (s *DynamoStore) CreateTrip(ctx context.Context, t Trip, owner Member) error {
+	t.MemberCount = 1
 	meta, err := item(tripPK(t.ID), metaSK, "trip", t)
 	if err != nil {
 		return err
 	}
-	member, err := item(tripPK(t.ID), memberSK(t.CreatedBy), "member", struct {
-		UserID string `dynamodbav:"userId"`
-	}{t.CreatedBy})
+	member, err := item(tripPK(t.ID), memberSK(owner.UserID), "member", owner)
 	if err != nil {
 		return err
 	}
-	mine, err := item(userPK(t.CreatedBy), tripSKPrefix+t.ID, "userTrip", t)
+	mine, err := item(userPK(owner.UserID), tripSKPrefix+t.ID, "userTrip", t.summary())
 	if err != nil {
 		return err
 	}

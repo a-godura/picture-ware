@@ -217,7 +217,8 @@ Resources:
   HttpApi:
     Type: AWS::Serverless::HttpApi
     Properties:
-      # Every route requires a Cognito access token (Authorization: Bearer).
+      # Every route requires a Cognito access token (Authorization: Bearer),
+      # except the public invite landing page GET /j/{code}.
       # HTTP API matches an access token's client_id claim against audience.
       Auth:
         DefaultAuthorizer: CognitoJwt
@@ -249,7 +250,9 @@ Resources:
         - Version: "2012-10-17"
           Statement:
             - Effect: Allow
-              Action: [dynamodb:GetItem, dynamodb:PutItem, dynamodb:Query, dynamodb:DeleteItem]
+              # UpdateItem: member counts and invite codes (inside transactions).
+              # BatchGetItem: members' display names (USER#<sub>/PROFILE).
+              Action: [dynamodb:GetItem, dynamodb:BatchGetItem, dynamodb:PutItem, dynamodb:Query, dynamodb:DeleteItem, dynamodb:UpdateItem]
               Resource: [!GetAtt AppTable.Arn, !GetAtt PhotosByUserTable.Arn]
             - Effect: Allow
               # PutObject backs the presigned POST, GetObject the presigned GET.
@@ -294,6 +297,64 @@ Resources:
             ApiId: !Ref HttpApi
             Method: DELETE
             Path: /trips/{tripId}/photos/{photoId}
+        GetMe:
+          Type: HttpApi
+          Properties:
+            ApiId: !Ref HttpApi
+            Method: GET
+            Path: /me
+        UpdateMe:
+          Type: HttpApi
+          Properties:
+            ApiId: !Ref HttpApi
+            Method: PATCH
+            Path: /me
+        ListTripMembers:
+          Type: HttpApi
+          Properties:
+            ApiId: !Ref HttpApi
+            Method: GET
+            Path: /trips/{tripId}/members
+        RemoveTripMember:
+          Type: HttpApi
+          Properties:
+            ApiId: !Ref HttpApi
+            Method: DELETE
+            Path: /trips/{tripId}/members/{userId}
+        GetTripInvite:
+          Type: HttpApi
+          Properties:
+            ApiId: !Ref HttpApi
+            Method: POST
+            Path: /trips/{tripId}/invite
+        RotateTripInvite:
+          Type: HttpApi
+          Properties:
+            ApiId: !Ref HttpApi
+            Method: POST
+            Path: /trips/{tripId}/invite/rotate
+        PreviewInvite:
+          Type: HttpApi
+          Properties:
+            ApiId: !Ref HttpApi
+            Method: GET
+            Path: /invites/{code}
+        AcceptInvite:
+          Type: HttpApi
+          Properties:
+            ApiId: !Ref HttpApi
+            Method: POST
+            Path: /invites/{code}/accept
+        # The only public route: the invite link's landing page. It reads
+        # nothing and is throttled like every other route.
+        InviteLandingPage:
+          Type: HttpApi
+          Properties:
+            ApiId: !Ref HttpApi
+            Method: GET
+            Path: /j/{code}
+            Auth:
+              Authorizer: NONE
         CreatePhoto:
           Type: HttpApi
           Properties:

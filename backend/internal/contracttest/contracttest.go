@@ -51,6 +51,15 @@ func repoRoot() (string, error) {
 	}
 }
 
+// HTML responses (the public invite landing page) are checked as plain
+// strings: content type, status and that the body is text.
+func init() {
+	openapi3filter.RegisterBodyDecoder("text/html", func(r io.Reader, _ http.Header, _ *openapi3.SchemaRef, _ openapi3filter.EncodingFn) (any, error) {
+		b, err := io.ReadAll(r)
+		return string(b), err
+	})
+}
+
 var loadSpec = sync.OnceValues(func() (*openapi3.T, error) {
 	root, err := repoRoot()
 	if err != nil {

@@ -11,7 +11,8 @@ All responses are JSON (`Content-Type: application/json`). Errors are
 
 ## Authentication
 
-Every route requires a **Cognito access token**:
+Every route requires a **Cognito access token** (except the public invite
+landing page `GET /j/{code}`):
 
 ```
 Authorization: Bearer <access_token>
@@ -263,6 +264,56 @@ part-way leaves the photo listed and the client can simply retry.
 - `404` if the trip or photo doesn't exist, or the caller isn't a member.
 - Deleting a `pending` photo (upload never finished) also works.
 - Errors: `401` (see Authentication), `403`, `404`, `429`, `500`.
+
+## `GET /me`, `PATCH /me`
+
+The caller's profile: `{"userId": "<sub>", "displayName": "Ana"}`, with
+`displayName: null` until set. `PATCH /me` takes `{"displayName": "..."}`.
+The name is trimmed and must be 1–50 characters with no control characters
+(otherwise `400`). The response is `200` with the updated profile. This is
+what other trip members see.
+
+## Members and invite links
+
+People join a trip through its **invite link**. Any member can get it and
+share it. Only the **owner** (the trip's creator) can rotate it or remove
+members. Members can leave; the owner can't (`409`, for now). A member's
+photos stay in the trip after they leave or are removed. At most 50
+members per trip.
+
+| route | who | result |
+|---|---|---|
+| `POST /trips/{tripId}/invite` | any member | `200` the trip's active invite (created on first call): `{code, url, appUrl, tripId, createdBy, createdAt}` |
+| `POST /trips/{tripId}/invite/rotate` | owner | `201` a new invite; the old code is dead at once (`403` for others) |
+| `GET /invites/{code}` | anyone signed in | `200 {code, trip:{id,name,startDate,endDate}, ownerName, memberCount, alreadyMember}`; `404 invite not found` for unknown/rotated codes |
+| `POST /invites/{code}/accept` | anyone signed in | `200` the trip (idempotent); `404` unknown/rotated; `409 trip is full` |
+| `GET /trips/{tripId}/members` | any member | `200 {members:[{userId, name, role: owner\|member, joinedAt}]}`, owner first |
+| `DELETE /trips/{tripId}/members/{userId}` | self, or owner | `204` (a removal also rotates the invite); `403` non-owner removing someone else; `404 member not found`; `409` owner leaving |
+| `GET /j/{code}` | **public** | `text/html` landing page with an "Open in picture-ware" button (`picture-ware://join/{code}`) |
+
+- Codes are 128 random bits, lowercase base32 (`[a-z2-7]{26}`). `url` is
+  `https://<api host>/j/<code>`, which works in any chat app. `appUrl` is
+  the deep link.
+- The landing page shows no trip data and doesn't look the code up (no
+  database read). Malformed codes get a `404` page. It's throttled like every
+  other route, with `no-store`, `no-referrer`, `noindex` and a strict CSP.
+- `name` / `ownerName` is the display name the person chose with
+  `PATCH /me`, or `null` if they haven't chosen one yet (the app shows
+  "Member"). No part of anyone's email is ever shown. Names are resolved
+  when they're read: one `BatchGetItem` of the members' `USER#<sub>/PROFILE`
+  items per members list (at most 50 keys, about 25 RRU), and one `GetItem`
+  per preview. So a new name shows up everywhere at once, and renaming
+  costs one write rather than one per trip.
+- When the owner removes someone, the invite is rotated in the same
+  transaction, so the removed person can't rejoin with the code they had.
+  Leaving doesn't rotate it.
+
+Items (single table): `TRIP#<id>/MEMBER#<sub>` `{userId, joinedAt}`,
+`USER#<sub>/PROFILE` `{userId, displayName}`,
+`INVITE#<code>/META` `{code, tripId, createdBy, createdAt}`, and on the
+trip's `META` item `inviteCode` (active code) and `memberCount`. Joining and
+leaving are transactions over the member record, the user's `USER#<sub>/TRIP#<id>`
+entry and the count. The count is guarded by the active code and the 50 cap.
 
 ## Legacy `/photos` routes (deprecated)
 

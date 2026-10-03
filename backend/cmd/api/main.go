@@ -38,8 +38,9 @@ func main() {
 		Presigner: &photos.S3Presigner{
 			Client: presign, Bucket: bucket, PostExpiry: 10 * time.Minute, GetExpiry: time.Hour,
 		},
-		NewID: uuid.NewString,
-		Now:   time.Now,
+		NewID:   uuid.NewString,
+		NewCode: photos.NewInviteCode,
+		Now:     time.Now,
 	}
 	legacy := &legacyapi.Handler{
 		Store:   &legacyphotos.DynamoStore{Client: db, Table: mustEnv("LEGACY_TABLE_NAME")},
