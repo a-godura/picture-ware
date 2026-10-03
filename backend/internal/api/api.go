@@ -21,7 +21,7 @@ import (
 
 // Store is the subset of trip and photo persistence the API needs.
 type Store interface {
-	CreateTrip(ctx context.Context, t photos.Trip) error
+	CreateTrip(ctx context.Context, t photos.Trip, owner photos.Member) error
 	ListTrips(ctx context.Context, userID string) ([]photos.Trip, error)
 	GetTrip(ctx context.Context, tripID string) (photos.Trip, error)
 	IsMember(ctx context.Context, tripID, userID string) (bool, error)
@@ -31,6 +31,18 @@ type Store interface {
 	// (photos.ListOrder) and the cursor of the next page ("" if none).
 	ListReadyPhotos(ctx context.Context, tripID string, limit int, cursor string) ([]photos.Photo, string, error)
 	DeletePhoto(ctx context.Context, p photos.Photo) error
+
+	ListMembers(ctx context.Context, tripID string) ([]photos.Member, error)
+	GetMember(ctx context.Context, tripID, userID string) (photos.Member, error)
+	AddMember(ctx context.Context, t photos.Trip, m photos.Member, code string) error
+	RemoveMember(ctx context.Context, tripID, userID string) error
+	GetInvite(ctx context.Context, code string) (photos.Invite, error)
+	PutInvite(ctx context.Context, inv photos.Invite, previous string) error
+}
+
+// Directory looks up the display name other members see for a user.
+type Directory interface {
+	DisplayName(ctx context.Context, userID string) (string, error)
 }
 
 // Objects deletes stored photo files.
@@ -49,7 +61,9 @@ type Handler struct {
 	Store     Store
 	Presigner Presigner
 	Objects   Objects
+	Directory Directory
 	NewID     func() string
+	NewCode   func() (string, error) // invite codes
 	Now       func() time.Time
 }
 
@@ -124,8 +138,14 @@ func UserID(req events.APIGatewayV2HTTPRequest) (string, bool) {
 // without usable claims is still answered 401 rather than trusted.
 func (h *Handler) Handle(ctx context.Context, req events.APIGatewayV2HTTPRequest) (events.APIGatewayV2HTTPResponse, error) {
 	switch req.RouteKey {
+	case "GET /j/{code}":
+		// Public (no JWT): the landing page an invite link opens.
+		return landingPage(req.PathParameters["code"]), nil
 	case "GET /trips", "POST /trips", "GET /trips/{tripId}",
-		"GET /trips/{tripId}/photos", "POST /trips/{tripId}/photos", "DELETE /trips/{tripId}/photos/{photoId}":
+		"GET /trips/{tripId}/photos", "POST /trips/{tripId}/photos", "DELETE /trips/{tripId}/photos/{photoId}",
+		"GET /trips/{tripId}/members", "DELETE /trips/{tripId}/members/{userId}",
+		"POST /trips/{tripId}/invite", "POST /trips/{tripId}/invite/rotate",
+		"GET /invites/{code}", "POST /invites/{code}/accept":
 	default:
 		return errorResponse(http.StatusNotFound, "not found"), nil
 	}
@@ -139,6 +159,10 @@ func (h *Handler) Handle(ctx context.Context, req events.APIGatewayV2HTTPRequest
 		return h.listTrips(ctx, userID), nil
 	case "POST /trips":
 		return h.createTrip(ctx, userID, req), nil
+	case "GET /invites/{code}":
+		return h.previewInvite(ctx, userID, req.PathParameters["code"]), nil
+	case "POST /invites/{code}/accept":
+		return h.acceptInvite(ctx, userID, req.PathParameters["code"]), nil
 	}
 
 	// Everything below is inside one trip: only its members may see it, and
@@ -154,6 +178,14 @@ func (h *Handler) Handle(ctx context.Context, req events.APIGatewayV2HTTPRequest
 		return h.listPhotos(ctx, tripID, req.QueryStringParameters), nil
 	case "POST /trips/{tripId}/photos":
 		return h.createPhoto(ctx, tripID, userID, req), nil
+	case "GET /trips/{tripId}/members":
+		return h.listMembers(ctx, tripID), nil
+	case "DELETE /trips/{tripId}/members/{userId}":
+		return h.removeMember(ctx, tripID, userID, req.PathParameters["userId"]), nil
+	case "POST /trips/{tripId}/invite":
+		return h.tripInvite(ctx, tripID, userID, req), nil
+	case "POST /trips/{tripId}/invite/rotate":
+		return h.rotateInvite(ctx, tripID, userID, req), nil
 	}
 	return h.deletePhoto(ctx, tripID, userID, req.PathParameters["photoId"]), nil
 }
@@ -206,7 +238,8 @@ func (h *Handler) createTrip(ctx context.Context, userID string, req events.APIG
 		ID: h.NewID(), Name: in.Name, StartDate: in.StartDate, EndDate: in.EndDate,
 		CreatedBy: userID, CreatedAt: h.Now().UTC(),
 	}
-	if err := h.Store.CreateTrip(ctx, t); err != nil {
+	owner := photos.Member{UserID: userID, Name: h.displayName(ctx, userID), JoinedAt: t.CreatedAt}
+	if err := h.Store.CreateTrip(ctx, t, owner); err != nil {
 		slog.ErrorContext(ctx, "create trip failed", "err", err)
 		return errorResponse(http.StatusInternalServerError, "internal error")
 	}

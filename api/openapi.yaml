@@ -536,7 +536,6 @@ paths:
       - $ref: "#/components/parameters/TripId"
     get:
       operationId: listTripMembers
-      x-planned: true
       summary: List a trip's members
       description: The owner first, then everyone else in the order they joined.
       responses:
@@ -585,7 +584,6 @@ paths:
         schema: { type: string }
     delete:
       operationId: removeTripMember
-      x-planned: true
       summary: Leave a trip, or (owner only) remove a member
       description: |
         With your own user id: you leave the trip. With someone else's: only
@@ -629,7 +627,6 @@ paths:
       - $ref: "#/components/parameters/TripId"
     post:
       operationId: getTripInvite
-      x-planned: true
       summary: Get the trip's invite link, creating it on first use
       description: |
         Any member can call this and share the result. A trip has at most one
@@ -663,7 +660,6 @@ paths:
       - $ref: "#/components/parameters/TripId"
     post:
       operationId: rotateTripInvite
-      x-planned: true
       summary: Replace the trip's invite link with a new one (owner only)
       description: |
         The old code stops working immediately (`404` on preview and accept);
@@ -700,7 +696,6 @@ paths:
       - $ref: "#/components/parameters/InviteCode"
     get:
       operationId: previewInvite
-      x-planned: true
       summary: See which trip an invite is for, before joining
       description: |
         Any signed-in user with the code can preview it. Shows only the
@@ -758,7 +753,6 @@ paths:
       - $ref: "#/components/parameters/InviteCode"
     post:
       operationId: acceptInvite
-      x-planned: true
       summary: Join the trip an invite is for
       description: |
         Makes the caller a member and returns the trip (it then appears in
@@ -796,7 +790,6 @@ paths:
       - $ref: "#/components/parameters/InviteCode"
     get:
       operationId: inviteLandingPage
-      x-planned: true
       summary: Public landing page for an invite link (HTML, no sign-in)
       description: |
         What `Invite.url` points to, so the link is tappable in any chat app.

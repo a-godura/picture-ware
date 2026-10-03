@@ -39,6 +39,21 @@ type Trip struct {
 	EndDate   string    `dynamodbav:"endDate,omitempty"`
 	CreatedBy string    `dynamodbav:"createdBy"`
 	CreatedAt time.Time `dynamodbav:"createdAt"`
+
+	// Only on the trip's own record (not the "my trips" copies): the active
+	// invite code ("" if none yet) and the number of members (0 means 1, for
+	// trips created before it was counted).
+	InviteCode  string `dynamodbav:"inviteCode,omitempty"`
+	MemberCount int    `dynamodbav:"memberCount,omitempty"`
+}
+
+// Members returns the trip's member count.
+func (t Trip) Members() int { return max(t.MemberCount, 1) }
+
+// summary drops the fields that only belong on the trip's own record.
+func (t Trip) summary() Trip {
+	t.InviteCode, t.MemberCount = "", 0
+	return t
 }
 
 // Photo is the metadata record for one photo in a trip.

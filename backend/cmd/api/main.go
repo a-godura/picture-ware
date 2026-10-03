@@ -12,6 +12,7 @@ import (
 	"github.com/aws/aws-lambda-go/events"
 	"github.com/aws/aws-lambda-go/lambda"
 	"github.com/aws/aws-sdk-go-v2/config"
+	"github.com/aws/aws-sdk-go-v2/service/cognitoidentityprovider"
 	"github.com/aws/aws-sdk-go-v2/service/dynamodb"
 	"github.com/aws/aws-sdk-go-v2/service/s3"
 	"github.com/google/uuid"
@@ -38,8 +39,12 @@ func main() {
 		Presigner: &photos.S3Presigner{
 			Client: presign, Bucket: bucket, PostExpiry: 10 * time.Minute, GetExpiry: time.Hour,
 		},
-		NewID: uuid.NewString,
-		Now:   time.Now,
+		Directory: &photos.CognitoDirectory{
+			Client: cognitoidentityprovider.NewFromConfig(cfg), UserPoolID: mustEnv("USER_POOL_ID"),
+		},
+		NewID:   uuid.NewString,
+		NewCode: photos.NewInviteCode,
+		Now:     time.Now,
 	}
 	legacy := &legacyapi.Handler{
 		Store:   &legacyphotos.DynamoStore{Client: db, Table: mustEnv("LEGACY_TABLE_NAME")},

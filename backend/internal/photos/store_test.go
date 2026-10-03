@@ -117,7 +117,8 @@ func TestItemShapeAndRoundTrip(t *testing.T) {
 
 func TestCreateTripWritesThreeItemsAtomically(t *testing.T) {
 	s, f := newFakeStore(t, nil)
-	if err := s.CreateTrip(context.Background(), testTrip); err != nil {
+	owner := Member{UserID: "user-1", Name: "ana.silva", JoinedAt: testCreated}
+	if err := s.CreateTrip(context.Background(), testTrip, owner); err != nil {
 		t.Fatal(err)
 	}
 	if len(f.calls) != 1 || f.calls[0].Op != "TransactWriteItems" {
@@ -135,6 +136,18 @@ func TestCreateTripWritesThreeItemsAtomically(t *testing.T) {
 	want := "TRIP#trip-1 META trip|TRIP#trip-1 MEMBER#user-1 member|USER#user-1 TRIP#trip-1 userTrip"
 	if got := strings.Join(keys, "|"); got != want {
 		t.Fatalf("items = %s\nwant    %s", got, want)
+	}
+	meta := items[0].(map[string]any)["Put"].(map[string]any)["Item"].(map[string]any)
+	member := items[1].(map[string]any)["Put"].(map[string]any)["Item"]
+	mine := items[2].(map[string]any)["Put"].(map[string]any)["Item"].(map[string]any)
+	if n, _ := meta["memberCount"].(map[string]any); n["N"] != "1" {
+		t.Errorf("trip's memberCount = %v, want 1", meta["memberCount"])
+	}
+	if str(member, "name") != "ana.silva" || str(member, "joinedAt") == "" {
+		t.Errorf("owner member item = %v", member)
+	}
+	if _, ok := mine["memberCount"]; ok {
+		t.Errorf("memberCount copied into the user's trip list: %v", mine)
 	}
 }
 
