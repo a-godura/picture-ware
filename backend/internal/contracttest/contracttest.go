@@ -1,16 +1,20 @@
-package api
-
-// Contract tests: every response the handler produces in this package's tests
-// must match api/openapi.yaml, and the routes deployed in template.yaml must be
-// exactly the routes the contract documents.
+// Package contracttest checks handler responses against the API contract
+// (api/openapi.yaml) and the routes deployed in template.yaml against the
+// routes it documents. It is used only from tests: every API handler's tests
+// pass their responses through Check, so a response that doesn't match the
+// contract fails the build.
+package contracttest
 
 import (
 	"bytes"
 	"context"
+	"errors"
 	"io"
 	"net/http"
 	"net/http/httptest"
+	"net/url"
 	"os"
+	"path/filepath"
 	"sort"
 	"strings"
 	"sync"
@@ -24,43 +28,57 @@ import (
 )
 
 const (
-	specPath     = "../../../api/openapi.yaml"
-	templatePath = "../../template.yaml"
+	specFile     = "api/openapi.yaml"      // relative to the repo root
+	templateFile = "backend/template.yaml" // relative to the repo root
 )
 
+// repoRoot walks up from the working directory (a package directory under
+// go test) to the directory containing api/openapi.yaml.
+func repoRoot() (string, error) {
+	dir, err := os.Getwd()
+	if err != nil {
+		return "", err
+	}
+	for {
+		if _, err := os.Stat(filepath.Join(dir, specFile)); err == nil {
+			return dir, nil
+		}
+		parent := filepath.Dir(dir)
+		if parent == dir {
+			return "", errors.New(specFile + " not found above the working directory")
+		}
+		dir = parent
+	}
+}
+
 var loadSpec = sync.OnceValues(func() (*openapi3.T, error) {
-	doc, err := openapi3.NewLoader().LoadFromFile(specPath)
+	root, err := repoRoot()
+	if err != nil {
+		return nil, err
+	}
+	doc, err := openapi3.NewLoader().LoadFromFile(filepath.Join(root, specFile))
 	if err != nil {
 		return nil, err
 	}
 	return doc, doc.Validate(context.Background())
 })
 
-func spec(t *testing.T) *openapi3.T {
+// Spec returns the parsed, validated contract or fails the test.
+func Spec(t testing.TB) *openapi3.T {
 	t.Helper()
 	doc, err := loadSpec()
 	if err != nil {
-		t.Fatalf("load %s: %v", specPath, err)
+		t.Fatalf("load %s: %v", specFile, err)
 	}
 	return doc
 }
 
-// handleT calls Handle and checks the response against the contract.
-func (h *Handler) handleT(t *testing.T, req events.APIGatewayV2HTTPRequest) (events.APIGatewayV2HTTPResponse, error) {
+// Check fails the test if resp isn't a documented response of the route in
+// req. Requests without a JWT never reach the Lambda in production (API
+// Gateway answers 401 itself) but the Lambda's own 401 is documented too.
+func Check(t testing.TB, req events.APIGatewayV2HTTPRequest, resp events.APIGatewayV2HTTPResponse) {
 	t.Helper()
-	resp, err := h.Handle(context.Background(), req)
-	if err == nil {
-		checkContract(t, req, resp)
-	}
-	return resp, err
-}
-
-// checkContract fails the test if resp isn't a documented response of the
-// route in req. Requests without a JWT never reach the Lambda in production
-// (API Gateway answers 401 itself) but the Lambda's own 401 is documented too.
-func checkContract(t *testing.T, req events.APIGatewayV2HTTPRequest, resp events.APIGatewayV2HTTPResponse) {
-	t.Helper()
-	doc := spec(t)
+	doc := Spec(t)
 	method, path, _ := strings.Cut(req.RouteKey, " ")
 	item := doc.Paths.Value(path)
 	var op *openapi3.Operation
@@ -100,37 +118,40 @@ func checkContract(t *testing.T, req events.APIGatewayV2HTTPRequest, resp events
 	}
 }
 
+// fillPath substitutes path parameters, escaping them so that test values
+// such as "../x" still produce a parseable URL.
 func fillPath(path string, params map[string]string) string {
 	for k, v := range params {
-		path = strings.ReplaceAll(path, "{"+k+"}", v)
+		path = strings.ReplaceAll(path, "{"+k+"}", url.PathEscape(v))
 	}
 	return path
 }
 
-func TestSpecIsValid(t *testing.T) {
-	spec(t)
-}
-
-// TestDeployedRoutesMatchContract compares the HttpApi events in template.yaml
-// with the operations in the contract.
-func TestDeployedRoutesMatchContract(t *testing.T) {
+// CheckDeployedRoutes fails the test unless the HttpApi events in
+// template.yaml are exactly the operations in the contract.
+func CheckDeployedRoutes(t testing.TB) {
+	t.Helper()
 	var documented []string
-	for path, item := range spec(t).Paths.Map() {
+	for path, item := range Spec(t).Paths.Map() {
 		for method := range item.Operations() {
 			documented = append(documented, method+" "+path)
 		}
 	}
 
-	raw, err := os.ReadFile(templatePath)
+	root, err := repoRoot()
 	if err != nil {
 		t.Fatal(err)
 	}
-	var root yaml.Node
-	if err := yaml.Unmarshal(raw, &root); err != nil {
+	raw, err := os.ReadFile(filepath.Join(root, templateFile))
+	if err != nil {
+		t.Fatal(err)
+	}
+	var doc yaml.Node
+	if err := yaml.Unmarshal(raw, &doc); err != nil {
 		t.Fatal(err)
 	}
 	var deployed []string
-	walk(&root, func(n *yaml.Node) {
+	walk(&doc, func(n *yaml.Node) {
 		// An HttpApi event: a mapping with Type: HttpApi and Properties.Method/Path.
 		if n.Kind != yaml.MappingNode || value(n, "Type") != "HttpApi" {
 			return
@@ -143,8 +164,8 @@ func TestDeployedRoutesMatchContract(t *testing.T) {
 	sort.Strings(documented)
 	sort.Strings(deployed)
 	if strings.Join(documented, "\n") != strings.Join(deployed, "\n") {
-		t.Fatalf("routes differ\ncontract (api/openapi.yaml):\n  %s\ntemplate.yaml:\n  %s",
-			strings.Join(documented, "\n  "), strings.Join(deployed, "\n  "))
+		t.Fatalf("routes differ\ncontract (%s):\n  %s\n%s:\n  %s",
+			specFile, strings.Join(documented, "\n  "), templateFile, strings.Join(deployed, "\n  "))
 	}
 }
 

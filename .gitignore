@@ -22,3 +22,6 @@ samconfig.local.toml
 
 # Claude Code local worktrees
 .claude/worktrees/
+
+# Local data backups (may contain user data)
+.claude/backup/

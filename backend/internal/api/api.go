@@ -1,4 +1,4 @@
-// Package api implements the HTTP API Lambda handler for /photos.
+// Package api implements the HTTP API Lambda handler for /trips.
 package api
 
 import (
@@ -7,8 +7,11 @@ import (
 	"encoding/base64"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"log/slog"
 	"net/http"
+	"sort"
+	"strconv"
 	"time"
 
 	"github.com/aws/aws-lambda-go/events"
@@ -16,12 +19,18 @@ import (
 	"github.com/a-godura/picture-ware/backend/internal/photos"
 )
 
-// Store is the subset of photo persistence the API needs.
+// Store is the subset of trip and photo persistence the API needs.
 type Store interface {
-	Put(ctx context.Context, p photos.Photo) error
-	ListReady(ctx context.Context, userID string) ([]photos.Photo, error)
-	// Delete returns photos.ErrNotFound if the user has no such photo.
-	Delete(ctx context.Context, userID, id string) error
+	CreateTrip(ctx context.Context, t photos.Trip) error
+	ListTrips(ctx context.Context, userID string) ([]photos.Trip, error)
+	GetTrip(ctx context.Context, tripID string) (photos.Trip, error)
+	IsMember(ctx context.Context, tripID, userID string) (bool, error)
+	PutPhoto(ctx context.Context, p photos.Photo) error
+	GetPhoto(ctx context.Context, tripID, id string) (photos.Photo, error)
+	// ListReadyPhotos returns one page of ready photos in listing order
+	// (photos.ListOrder) and the cursor of the next page ("" if none).
+	ListReadyPhotos(ctx context.Context, tripID string, limit int, cursor string) ([]photos.Photo, string, error)
+	DeletePhoto(ctx context.Context, p photos.Photo) error
 }
 
 // Objects deletes stored photo files.
@@ -35,7 +44,7 @@ type Presigner interface {
 	PresignGet(ctx context.Context, key string) (string, error)
 }
 
-// Handler serves POST /photos, GET /photos and DELETE /photos/{id}.
+// Handler serves the /trips API.
 type Handler struct {
 	Store     Store
 	Presigner Presigner
@@ -44,26 +53,49 @@ type Handler struct {
 	Now       func() time.Time
 }
 
-// CreateResponse is the 201 body of POST /photos.
+// TripView is a trip in API responses.
+type TripView struct {
+	ID        string    `json:"id"`
+	Name      string    `json:"name"`
+	StartDate string    `json:"startDate"`
+	EndDate   *string   `json:"endDate"`
+	CreatedBy string    `json:"createdBy"`
+	CreatedAt time.Time `json:"createdAt"`
+}
+
+// TripList is the 200 body of GET /trips.
+type TripList struct {
+	Trips []TripView `json:"trips"`
+}
+
+// CreateResponse is the 201 body of POST /trips/{tripId}/photos.
 type CreateResponse struct {
 	ID     string        `json:"id"`
 	Upload photos.Upload `json:"upload"`
 }
 
-// PhotoView is one entry in the GET /photos response.
+// PhotoView is one entry in the GET /trips/{tripId}/photos response.
 type PhotoView struct {
-	ID        string     `json:"id"`
-	Lat       float64    `json:"lat"`
-	Lng       float64    `json:"lng"`
-	TakenAt   *time.Time `json:"takenAt"`
-	CreatedAt time.Time  `json:"createdAt"`
-	ImageURL  string     `json:"imageUrl"`
+	ID         string     `json:"id"`
+	Lat        float64    `json:"lat"`
+	Lng        float64    `json:"lng"`
+	TakenAt    *time.Time `json:"takenAt"`
+	CreatedAt  time.Time  `json:"createdAt"`
+	UploaderID string     `json:"uploaderId"`
+	ImageURL   string     `json:"imageUrl"`
 }
 
-// ListResponse is the 200 body of GET /photos.
+// ListResponse is the 200 body of GET /trips/{tripId}/photos.
 type ListResponse struct {
-	Photos []PhotoView `json:"photos"`
+	Photos     []PhotoView `json:"photos"`
+	NextCursor *string     `json:"nextCursor"`
 }
+
+// Page size of GET /trips/{tripId}/photos (?limit=).
+const (
+	DefaultPageSize = 200
+	MaxPageSize     = 500
+)
 
 const maxBodyBytes = 4 << 10
 
@@ -81,7 +113,7 @@ func UserID(req events.APIGatewayV2HTTPRequest) (string, bool) {
 		return "", false
 	}
 	sub := claims["sub"]
-	if !photos.ValidUserID(sub) {
+	if !photos.ValidID(sub) {
 		return "", false
 	}
 	return sub, true
@@ -92,7 +124,8 @@ func UserID(req events.APIGatewayV2HTTPRequest) (string, bool) {
 // without usable claims is still answered 401 rather than trusted.
 func (h *Handler) Handle(ctx context.Context, req events.APIGatewayV2HTTPRequest) (events.APIGatewayV2HTTPResponse, error) {
 	switch req.RouteKey {
-	case "POST /photos", "GET /photos", "DELETE /photos/{id}":
+	case "GET /trips", "POST /trips", "GET /trips/{tripId}",
+		"GET /trips/{tripId}/photos", "POST /trips/{tripId}/photos", "DELETE /trips/{tripId}/photos/{photoId}":
 	default:
 		return errorResponse(http.StatusNotFound, "not found"), nil
 	}
@@ -102,40 +135,109 @@ func (h *Handler) Handle(ctx context.Context, req events.APIGatewayV2HTTPRequest
 		return errorResponse(http.StatusUnauthorized, "unauthorized"), nil
 	}
 	switch req.RouteKey {
-	case "POST /photos":
-		return h.create(ctx, userID, req), nil
-	case "DELETE /photos/{id}":
-		return h.delete(ctx, userID, req.PathParameters["id"]), nil
+	case "GET /trips":
+		return h.listTrips(ctx, userID), nil
+	case "POST /trips":
+		return h.createTrip(ctx, userID, req), nil
 	}
-	return h.list(ctx, userID), nil
+
+	// Everything below is inside one trip: only its members may see it, and
+	// to anyone else it doesn't exist.
+	tripID := req.PathParameters["tripId"]
+	if resp, ok := h.requireMember(ctx, tripID, userID); !ok {
+		return resp, nil
+	}
+	switch req.RouteKey {
+	case "GET /trips/{tripId}":
+		return h.getTrip(ctx, tripID), nil
+	case "GET /trips/{tripId}/photos":
+		return h.listPhotos(ctx, tripID, req.QueryStringParameters), nil
+	case "POST /trips/{tripId}/photos":
+		return h.createPhoto(ctx, tripID, userID, req), nil
+	}
+	return h.deletePhoto(ctx, tripID, userID, req.PathParameters["photoId"]), nil
 }
 
-func (h *Handler) create(ctx context.Context, userID string, req events.APIGatewayV2HTTPRequest) events.APIGatewayV2HTTPResponse {
-	body := []byte(req.Body)
-	if req.IsBase64Encoded {
-		// HTTP API base64-encodes bodies it doesn't recognise as text.
-		var err error
-		if body, err = base64.StdEncoding.DecodeString(req.Body); err != nil {
-			return errorResponse(http.StatusBadRequest, "invalid request body")
+func (h *Handler) requireMember(ctx context.Context, tripID, userID string) (events.APIGatewayV2HTTPResponse, bool) {
+	if !photos.ValidID(tripID) {
+		return errorResponse(http.StatusNotFound, "trip not found"), false
+	}
+	ok, err := h.Store.IsMember(ctx, tripID, userID)
+	if err != nil {
+		slog.ErrorContext(ctx, "membership check failed", "tripId", tripID, "err", err)
+		return errorResponse(http.StatusInternalServerError, "internal error"), false
+	}
+	if !ok {
+		return errorResponse(http.StatusNotFound, "trip not found"), false
+	}
+	return events.APIGatewayV2HTTPResponse{}, true
+}
+
+func (h *Handler) listTrips(ctx context.Context, userID string) events.APIGatewayV2HTTPResponse {
+	trips, err := h.Store.ListTrips(ctx, userID)
+	if err != nil {
+		slog.ErrorContext(ctx, "list trips failed", "err", err)
+		return errorResponse(http.StatusInternalServerError, "internal error")
+	}
+	// Newest trips first.
+	sort.SliceStable(trips, func(i, j int) bool {
+		if trips[i].StartDate != trips[j].StartDate {
+			return trips[i].StartDate > trips[j].StartDate
 		}
+		return trips[i].CreatedAt.After(trips[j].CreatedAt)
+	})
+	out := TripList{Trips: make([]TripView, 0, len(trips))}
+	for _, t := range trips {
+		out.Trips = append(out.Trips, tripView(t))
 	}
-	if len(body) > maxBodyBytes {
-		return errorResponse(http.StatusRequestEntityTooLarge, "request body too large")
+	return jsonResponse(http.StatusOK, out)
+}
+
+func (h *Handler) createTrip(ctx context.Context, userID string, req events.APIGatewayV2HTTPRequest) events.APIGatewayV2HTTPResponse {
+	var in photos.CreateTripRequest
+	if resp, ok := decodeBody(req, &in, "body must be a JSON object with name, startDate and optional endDate"); !ok {
+		return resp
 	}
+	in, err := in.Validate()
+	if err != nil {
+		return errorResponse(http.StatusBadRequest, err.Error())
+	}
+	t := photos.Trip{
+		ID: h.NewID(), Name: in.Name, StartDate: in.StartDate, EndDate: in.EndDate,
+		CreatedBy: userID, CreatedAt: h.Now().UTC(),
+	}
+	if err := h.Store.CreateTrip(ctx, t); err != nil {
+		slog.ErrorContext(ctx, "create trip failed", "err", err)
+		return errorResponse(http.StatusInternalServerError, "internal error")
+	}
+	return jsonResponse(http.StatusCreated, tripView(t))
+}
+
+func (h *Handler) getTrip(ctx context.Context, tripID string) events.APIGatewayV2HTTPResponse {
+	t, err := h.Store.GetTrip(ctx, tripID)
+	if errors.Is(err, photos.ErrNotFound) {
+		return errorResponse(http.StatusNotFound, "trip not found")
+	}
+	if err != nil {
+		slog.ErrorContext(ctx, "get trip failed", "tripId", tripID, "err", err)
+		return errorResponse(http.StatusInternalServerError, "internal error")
+	}
+	return jsonResponse(http.StatusOK, tripView(t))
+}
+
+func (h *Handler) createPhoto(ctx context.Context, tripID, userID string, req events.APIGatewayV2HTTPRequest) events.APIGatewayV2HTTPResponse {
 	var in photos.CreateRequest
-	dec := json.NewDecoder(bytes.NewReader(body))
-	dec.DisallowUnknownFields()
-	if err := dec.Decode(&in); err != nil {
-		return errorResponse(http.StatusBadRequest, "body must be a JSON object with lat, lng, contentType and optional takenAt")
+	if resp, ok := decodeBody(req, &in, "body must be a JSON object with lat, lng, contentType and optional takenAt"); !ok {
+		return resp
 	}
 	takenAt, err := in.Validate()
 	if err != nil {
 		return errorResponse(http.StatusBadRequest, err.Error())
 	}
-
 	p := photos.Photo{
-		UserID:      userID,
+		TripID:      tripID,
 		ID:          h.NewID(),
+		UploaderID:  userID,
 		Lat:         *in.Lat,
 		Lng:         *in.Lng,
 		TakenAt:     takenAt,
@@ -143,11 +245,11 @@ func (h *Handler) create(ctx context.Context, userID string, req events.APIGatew
 		Status:      photos.StatusPending,
 		CreatedAt:   h.Now().UTC(),
 	}
-	if err := h.Store.Put(ctx, p); err != nil {
+	if err := h.Store.PutPhoto(ctx, p); err != nil {
 		slog.ErrorContext(ctx, "store put failed", "err", err)
 		return errorResponse(http.StatusInternalServerError, "internal error")
 	}
-	up, err := h.Presigner.PresignUpload(ctx, photos.ObjectKey(userID, p.ID), p.ContentType)
+	up, err := h.Presigner.PresignUpload(ctx, photos.ObjectKey(tripID, p.ID), p.ContentType)
 	if err != nil {
 		slog.ErrorContext(ctx, "presign upload failed", "err", err)
 		return errorResponse(http.StatusInternalServerError, "internal error")
@@ -155,38 +257,66 @@ func (h *Handler) create(ctx context.Context, userID string, req events.APIGatew
 	return jsonResponse(http.StatusCreated, CreateResponse{ID: p.ID, Upload: up})
 }
 
-func (h *Handler) list(ctx context.Context, userID string) events.APIGatewayV2HTTPResponse {
-	items, err := h.Store.ListReady(ctx, userID)
+// listPhotos returns one page of the trip's ready photos, in capture order
+// (photos without a capture time last, by upload time) across pages.
+func (h *Handler) listPhotos(ctx context.Context, tripID string, query map[string]string) events.APIGatewayV2HTTPResponse {
+	limit := DefaultPageSize
+	if s, ok := query["limit"]; ok {
+		n, err := strconv.Atoi(s)
+		if err != nil || n < 1 || n > MaxPageSize {
+			return errorResponse(http.StatusBadRequest, fmt.Sprintf("limit must be an integer from 1 to %d", MaxPageSize))
+		}
+		limit = n
+	}
+	items, next, err := h.Store.ListReadyPhotos(ctx, tripID, limit, query["cursor"])
+	if errors.Is(err, photos.ErrInvalidCursor) {
+		return errorResponse(http.StatusBadRequest, "invalid cursor")
+	}
 	if err != nil {
 		slog.ErrorContext(ctx, "list failed", "err", err)
 		return errorResponse(http.StatusInternalServerError, "internal error")
 	}
 	out := ListResponse{Photos: make([]PhotoView, 0, len(items))}
+	if next != "" {
+		out.NextCursor = &next
+	}
 	for _, p := range items {
-		url, err := h.Presigner.PresignGet(ctx, photos.ObjectKey(userID, p.ID))
+		url, err := h.Presigner.PresignGet(ctx, photos.ObjectKey(tripID, p.ID))
 		if err != nil {
 			slog.ErrorContext(ctx, "presign get failed", "id", p.ID, "err", err)
 			return errorResponse(http.StatusInternalServerError, "internal error")
 		}
 		out.Photos = append(out.Photos, PhotoView{
-			ID: p.ID, Lat: p.Lat, Lng: p.Lng, TakenAt: p.TakenAt, CreatedAt: p.CreatedAt, ImageURL: url,
+			ID: p.ID, Lat: p.Lat, Lng: p.Lng, TakenAt: p.TakenAt, CreatedAt: p.CreatedAt,
+			UploaderID: p.UploaderID, ImageURL: url,
 		})
 	}
 	return jsonResponse(http.StatusOK, out)
 }
 
-// delete removes the file first, then the record, so a failure part-way
-// leaves the record in place and the client can retry. Keys are scoped to
-// userID, so a caller can only ever touch their own photos.
-func (h *Handler) delete(ctx context.Context, userID, id string) events.APIGatewayV2HTTPResponse {
-	if !photos.ValidPhotoID(id) {
+// deletePhoto lets a photo's uploader remove it: the file first, then the
+// record, so a failure part-way leaves the record in place and the client
+// can retry.
+func (h *Handler) deletePhoto(ctx context.Context, tripID, userID, id string) events.APIGatewayV2HTTPResponse {
+	if !photos.ValidID(id) {
 		return errorResponse(http.StatusNotFound, "photo not found")
 	}
-	if err := h.Objects.Delete(ctx, photos.ObjectKey(userID, id)); err != nil {
+	p, err := h.Store.GetPhoto(ctx, tripID, id)
+	if errors.Is(err, photos.ErrNotFound) {
+		return errorResponse(http.StatusNotFound, "photo not found")
+	}
+	if err != nil {
+		slog.ErrorContext(ctx, "get photo failed", "id", id, "err", err)
+		return errorResponse(http.StatusInternalServerError, "internal error")
+	}
+	if p.UploaderID != userID {
+		return errorResponse(http.StatusForbidden, "only the person who uploaded a photo can delete it")
+	}
+	if err := h.Objects.Delete(ctx, photos.ObjectKey(tripID, id)); err != nil {
 		slog.ErrorContext(ctx, "delete object failed", "id", id, "err", err)
 		return errorResponse(http.StatusInternalServerError, "internal error")
 	}
-	err := h.Store.Delete(ctx, userID, id)
+	err = h.Store.DeletePhoto(ctx, p)
 	if errors.Is(err, photos.ErrNotFound) {
 		return errorResponse(http.StatusNotFound, "photo not found")
 	}
@@ -195,6 +325,36 @@ func (h *Handler) delete(ctx context.Context, userID, id string) events.APIGatew
 		return errorResponse(http.StatusInternalServerError, "internal error")
 	}
 	return events.APIGatewayV2HTTPResponse{StatusCode: http.StatusNoContent}
+}
+
+func tripView(t photos.Trip) TripView {
+	v := TripView{ID: t.ID, Name: t.Name, StartDate: t.StartDate, CreatedBy: t.CreatedBy, CreatedAt: t.CreatedAt}
+	if t.EndDate != "" {
+		end := t.EndDate
+		v.EndDate = &end
+	}
+	return v
+}
+
+// decodeBody strictly decodes a (possibly base64) JSON body into v.
+func decodeBody(req events.APIGatewayV2HTTPRequest, v any, hint string) (events.APIGatewayV2HTTPResponse, bool) {
+	body := []byte(req.Body)
+	if req.IsBase64Encoded {
+		// HTTP API base64-encodes bodies it doesn't recognise as text.
+		var err error
+		if body, err = base64.StdEncoding.DecodeString(req.Body); err != nil {
+			return errorResponse(http.StatusBadRequest, "invalid request body"), false
+		}
+	}
+	if len(body) > maxBodyBytes {
+		return errorResponse(http.StatusRequestEntityTooLarge, "request body too large"), false
+	}
+	dec := json.NewDecoder(bytes.NewReader(body))
+	dec.DisallowUnknownFields()
+	if err := dec.Decode(v); err != nil {
+		return errorResponse(http.StatusBadRequest, hint), false
+	}
+	return events.APIGatewayV2HTTPResponse{}, true
 }
 
 type errorBody struct {

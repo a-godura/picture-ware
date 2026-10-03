@@ -80,7 +80,34 @@ Resources:
               Bool:
                 aws:SecureTransport: "false"
 
-  # Owner-scoped: partition = Cognito sub, sort = photo id.
+  # One table for trips, members and photos, keyed by generic PK/SK strings
+  # (see internal/photos/store.go for the item shapes).
+  AppTable:
+    Type: AWS::DynamoDB::Table
+    DeletionPolicy: Retain
+    UpdateReplacePolicy: Retain
+    Properties:
+      BillingMode: PAY_PER_REQUEST
+      AttributeDefinitions:
+        - AttributeName: PK
+          AttributeType: S
+        - AttributeName: SK
+          AttributeType: S
+      KeySchema:
+        - AttributeName: PK
+          KeyType: HASH
+        - AttributeName: SK
+          KeyType: RANGE
+      PointInTimeRecoverySpecification:
+        PointInTimeRecoveryEnabled: true
+      # Hard ceiling on on-demand throughput (and so on request spend):
+      # requests above it are throttled, not billed.
+      OnDemandThroughput:
+        MaxReadRequestUnits: 100
+        MaxWriteRequestUnits: 25
+
+  # Legacy per-user photo table, used only by the /photos routes. Remove
+  # (with internal/legacy) once no client calls /photos.
   PhotosByUserTable:
     Type: AWS::DynamoDB::Table
     DeletionPolicy: Delete
@@ -212,22 +239,61 @@ Resources:
       BuildMethod: go1.x
     Properties:
       CodeUri: cmd/api/
-      Description: picture-ware POST/GET /photos, DELETE /photos/{id}
+      Description: picture-ware /trips API (+ legacy /photos)
       Environment:
         Variables:
-          TABLE_NAME: !Ref PhotosByUserTable
+          TABLE_NAME: !Ref AppTable
+          LEGACY_TABLE_NAME: !Ref PhotosByUserTable
           BUCKET_NAME: !Ref PhotosBucket
       Policies:
         - Version: "2012-10-17"
           Statement:
             - Effect: Allow
-              Action: [dynamodb:PutItem, dynamodb:Query, dynamodb:DeleteItem]
-              Resource: !GetAtt PhotosByUserTable.Arn
+              Action: [dynamodb:GetItem, dynamodb:PutItem, dynamodb:Query, dynamodb:DeleteItem]
+              Resource: [!GetAtt AppTable.Arn, !GetAtt PhotosByUserTable.Arn]
             - Effect: Allow
               # PutObject backs the presigned POST, GetObject the presigned GET.
               Action: [s3:PutObject, s3:GetObject, s3:DeleteObject]
-              Resource: !Sub "${PhotosBucket.Arn}/photos/*"
+              Resource:
+                - !Sub "${PhotosBucket.Arn}/trips/*"
+                - !Sub "${PhotosBucket.Arn}/photos/*"
       Events:
+        ListTrips:
+          Type: HttpApi
+          Properties:
+            ApiId: !Ref HttpApi
+            Method: GET
+            Path: /trips
+        CreateTrip:
+          Type: HttpApi
+          Properties:
+            ApiId: !Ref HttpApi
+            Method: POST
+            Path: /trips
+        GetTrip:
+          Type: HttpApi
+          Properties:
+            ApiId: !Ref HttpApi
+            Method: GET
+            Path: /trips/{tripId}
+        ListTripPhotos:
+          Type: HttpApi
+          Properties:
+            ApiId: !Ref HttpApi
+            Method: GET
+            Path: /trips/{tripId}/photos
+        CreateTripPhoto:
+          Type: HttpApi
+          Properties:
+            ApiId: !Ref HttpApi
+            Method: POST
+            Path: /trips/{tripId}/photos
+        DeleteTripPhoto:
+          Type: HttpApi
+          Properties:
+            ApiId: !Ref HttpApi
+            Method: DELETE
+            Path: /trips/{tripId}/photos/{photoId}
         CreatePhoto:
           Type: HttpApi
           Properties:
@@ -262,10 +328,16 @@ Resources:
       Description: picture-ware marks photos ready on S3 ObjectCreated
       Environment:
         Variables:
-          TABLE_NAME: !Ref PhotosByUserTable
+          TABLE_NAME: !Ref AppTable
+          LEGACY_TABLE_NAME: !Ref PhotosByUserTable
       Policies:
         - Version: "2012-10-17"
           Statement:
+            - Effect: Allow
+              # MarkReady reads the pending record, then (in one transaction)
+              # updates it and puts its listing copy.
+              Action: [dynamodb:GetItem, dynamodb:UpdateItem, dynamodb:PutItem]
+              Resource: !GetAtt AppTable.Arn
             - Effect: Allow
               Action: dynamodb:UpdateItem
               Resource: !GetAtt PhotosByUserTable.Arn
@@ -280,6 +352,16 @@ Resources:
                 Rules:
                   - Name: prefix
                     Value: photos/
+        TripPhotoUploaded:
+          Type: S3
+          Properties:
+            Bucket: !Ref PhotosBucket
+            Events: s3:ObjectCreated:*
+            Filter:
+              S3Key:
+                Rules:
+                  - Name: prefix
+                    Value: trips/
 
   ProcessorFunctionLogGroup:
     Type: AWS::Logs::LogGroup
@@ -376,9 +458,12 @@ Outputs:
   BucketName:
     Description: Photo bucket
     Value: !Ref PhotosBucket
-  TableName:
-    Description: Photo metadata table (pk userId, sk id)
+  LegacyTableName:
+    Description: Legacy per-user photo table (/photos routes)
     Value: !Ref PhotosByUserTable
+  TableName:
+    Description: App table for trips, members and photos (generic PK/SK)
+    Value: !Ref AppTable
   UserPoolId:
     Description: Cognito user pool id (JWT issuer is https://cognito-idp.<region>.amazonaws.com/<UserPoolId>)
     Value: !Ref UserPool

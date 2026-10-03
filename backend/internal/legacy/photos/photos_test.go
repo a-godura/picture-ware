@@ -2,7 +2,6 @@ package photos
 
 import (
 	"errors"
-	"strings"
 	"testing"
 	"time"
 )
@@ -57,56 +56,21 @@ func TestCreateRequestValidate(t *testing.T) {
 }
 
 func TestObjectKeyRoundTrip(t *testing.T) {
-	const trip, id = "8f0b2c1e-1111-4a5b-9c3d-abcdef012345", "6f1c0e8e-5d0b-4b8a-9f1e-2a3b4c5d6e7f"
-	key := ObjectKey(trip, id)
-	if key != "trips/"+trip+"/"+id {
+	const user, id = "8f0b2c1e-1111-4a5b-9c3d-abcdef012345", "6f1c0e8e-5d0b-4b8a-9f1e-2a3b4c5d6e7f"
+	key := ObjectKey(user, id)
+	if key != "photos/"+user+"/"+id {
 		t.Fatalf("key = %q", key)
 	}
 	u, i, ok := ParseObjectKey(key)
-	if !ok || u != trip || i != id {
+	if !ok || u != user || i != id {
 		t.Fatalf("ParseObjectKey(%q) = %q, %q, %v", key, u, i, ok)
 	}
 }
 
 func TestParseObjectKeyRejects(t *testing.T) {
-	for _, key := range []string{"", "trips/", "trips/id", "trips/u/", "trips//id", "trips/u/a/b", "photos/u/id", "trips/../id", "trips/u u/id", "trips/u/i d"} {
+	for _, key := range []string{"", "photos/", "photos/id", "photos/u/", "photos//id", "photos/u/a/b", "other/u/id", "photos/../id", "photos/u u/id"} {
 		if u, i, ok := ParseObjectKey(key); ok {
 			t.Errorf("ParseObjectKey(%q) = %q, %q, true", key, u, i)
 		}
-	}
-}
-
-func TestCreateTripRequestValidate(t *testing.T) {
-	tests := []struct {
-		name    string
-		in      CreateTripRequest
-		wantErr string
-	}{
-		{name: "ok", in: CreateTripRequest{Name: " Lisbon ", StartDate: "2026-10-01", EndDate: "2026-10-07"}},
-		{name: "same day", in: CreateTripRequest{Name: "x", StartDate: "2026-10-01", EndDate: "2026-10-01"}},
-		{name: "no end", in: CreateTripRequest{Name: "x", StartDate: "2026-10-01"}},
-		{name: "100 runes", in: CreateTripRequest{Name: strings.Repeat("é", 100), StartDate: "2026-10-01"}},
-		{name: "empty name", in: CreateTripRequest{Name: " ", StartDate: "2026-10-01"}, wantErr: "name"},
-		{name: "101 runes", in: CreateTripRequest{Name: strings.Repeat("é", 101), StartDate: "2026-10-01"}, wantErr: "name"},
-		{name: "bad start", in: CreateTripRequest{Name: "x", StartDate: "2026-13-01"}, wantErr: "startDate"},
-		{name: "bad end", in: CreateTripRequest{Name: "x", StartDate: "2026-10-01", EndDate: "soon"}, wantErr: "endDate"},
-		{name: "end before start", in: CreateTripRequest{Name: "x", StartDate: "2026-10-02", EndDate: "2026-10-01"}, wantErr: "endDate"},
-	}
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			got, err := tt.in.Validate()
-			if tt.wantErr == "" {
-				if err != nil {
-					t.Fatal(err)
-				}
-				if got.Name != strings.TrimSpace(tt.in.Name) {
-					t.Fatalf("name not trimmed: %q", got.Name)
-				}
-				return
-			}
-			if !errors.Is(err, ErrValidation) || !strings.Contains(err.Error(), tt.wantErr) {
-				t.Fatalf("err = %v, want validation error about %s", err, tt.wantErr)
-			}
-		})
 	}
 }

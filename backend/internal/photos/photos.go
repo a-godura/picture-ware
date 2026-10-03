@@ -1,5 +1,5 @@
-// Package photos holds the photo domain model, request validation, and the
-// storage abstractions the Lambda handlers depend on.
+// Package photos holds the trip and photo domain model, request validation,
+// and the storage abstractions the Lambda handlers depend on.
 package photos
 
 import (
@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"strings"
 	"time"
+	"unicode/utf8"
 )
 
 // Status values for a photo record.
@@ -15,9 +16,10 @@ const (
 	StatusReady   = "ready"
 )
 
-// KeyPrefix is the S3 key prefix under which photo objects are stored. Each
-// object lives at photos/<userId>/<id>.
-const KeyPrefix = "photos/"
+// KeyPrefix is the S3 key prefix under which trip photo objects are stored.
+// Each object lives at trips/<tripId>/<id>. (photos/ belongs to the legacy
+// per-user API.)
+const KeyPrefix = "trips/"
 
 // MaxUploadBytes is the largest photo accepted by the presigned POST policy.
 const MaxUploadBytes = 15 << 20 // 15 MiB
@@ -28,10 +30,22 @@ var AllowedContentTypes = map[string]bool{
 	"image/heic": true,
 }
 
-// Photo is the metadata record stored in DynamoDB, keyed by (userId, id).
+// Trip groups photos from a vacation or event. Dates are calendar days
+// (YYYY-MM-DD); EndDate is optional.
+type Trip struct {
+	ID        string    `dynamodbav:"tripId"`
+	Name      string    `dynamodbav:"name"`
+	StartDate string    `dynamodbav:"startDate"`
+	EndDate   string    `dynamodbav:"endDate,omitempty"`
+	CreatedBy string    `dynamodbav:"createdBy"`
+	CreatedAt time.Time `dynamodbav:"createdAt"`
+}
+
+// Photo is the metadata record for one photo in a trip.
 type Photo struct {
-	UserID      string     `dynamodbav:"userId"`
+	TripID      string     `dynamodbav:"tripId"`
 	ID          string     `dynamodbav:"id"`
+	UploaderID  string     `dynamodbav:"uploaderId"`
 	Lat         float64    `dynamodbav:"lat"`
 	Lng         float64    `dynamodbav:"lng"`
 	TakenAt     *time.Time `dynamodbav:"takenAt,omitempty"`
@@ -41,26 +55,27 @@ type Photo struct {
 	CreatedAt   time.Time  `dynamodbav:"createdAt"`
 }
 
-// ObjectKey returns the S3 key for a user's photo: photos/<userID>/<id>.
-func ObjectKey(userID, id string) string { return KeyPrefix + userID + "/" + id }
+// ObjectKey returns the S3 key for a trip's photo: trips/<tripID>/<id>.
+func ObjectKey(tripID, id string) string { return KeyPrefix + tripID + "/" + id }
 
 // ParseObjectKey is the inverse of ObjectKey. It rejects keys outside
-// KeyPrefix and keys that are not exactly <userID>/<id> after it.
-func ParseObjectKey(key string) (userID, id string, ok bool) {
+// KeyPrefix and keys that are not exactly <tripID>/<id> after it.
+func ParseObjectKey(key string) (tripID, id string, ok bool) {
 	rest, ok := strings.CutPrefix(key, KeyPrefix)
 	if !ok {
 		return "", "", false
 	}
-	userID, id, ok = strings.Cut(rest, "/")
-	if !ok || !ValidUserID(userID) || id == "" || strings.Contains(id, "/") {
+	tripID, id, ok = strings.Cut(rest, "/")
+	if !ok || !ValidID(tripID) || !ValidID(id) {
 		return "", "", false
 	}
-	return userID, id, true
+	return tripID, id, true
 }
 
-// ValidUserID reports whether s is safe to use as a key segment. Cognito
-// "sub" values are UUIDs; this accepts a conservative superset.
-func ValidUserID(s string) bool {
+// ValidID reports whether s is safe to use as a key segment. Trip and photo
+// ids are server-generated UUIDs and Cognito "sub" values are UUIDs; this
+// accepts a conservative superset.
+func ValidID(s string) bool {
 	if s == "" || len(s) > 128 {
 		return false
 	}
@@ -72,12 +87,46 @@ func ValidUserID(s string) bool {
 	return true
 }
 
-// ValidPhotoID reports whether s is safe to use as a photo id key segment.
-// Ids are server-generated UUIDs; this uses the same conservative charset as
-// ValidUserID.
-func ValidPhotoID(s string) bool { return ValidUserID(s) }
+// CreateTripRequest is the body of POST /trips.
+type CreateTripRequest struct {
+	Name      string `json:"name"`
+	StartDate string `json:"startDate"`
+	EndDate   string `json:"endDate,omitempty"`
+}
 
-// CreateRequest is the body of POST /photos.
+const (
+	dateLayout     = "2006-01-02"
+	maxTripNameLen = 100
+)
+
+// Validate checks a create-trip request and returns it with the name trimmed.
+// Errors wrap ErrValidation.
+func (r CreateTripRequest) Validate() (CreateTripRequest, error) {
+	r.Name = strings.TrimSpace(r.Name)
+	switch {
+	case r.Name == "":
+		return r, fmt.Errorf("%w: name is required", ErrValidation)
+	case utf8.RuneCountInString(r.Name) > maxTripNameLen:
+		return r, fmt.Errorf("%w: name must be at most %d characters", ErrValidation, maxTripNameLen)
+	}
+	start, err := time.Parse(dateLayout, r.StartDate)
+	if err != nil {
+		return r, fmt.Errorf("%w: startDate must be a date like 2026-10-03", ErrValidation)
+	}
+	if r.EndDate == "" {
+		return r, nil
+	}
+	end, err := time.Parse(dateLayout, r.EndDate)
+	if err != nil {
+		return r, fmt.Errorf("%w: endDate must be a date like 2026-10-03", ErrValidation)
+	}
+	if end.Before(start) {
+		return r, fmt.Errorf("%w: endDate must not be before startDate", ErrValidation)
+	}
+	return r, nil
+}
+
+// CreateRequest is the body of POST /trips/{tripId}/photos.
 type CreateRequest struct {
 	Lat         *float64 `json:"lat"`
 	Lng         *float64 `json:"lng"`

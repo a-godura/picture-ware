@@ -1,12 +1,15 @@
-// Command api is the HTTP API Lambda for /photos.
+// Command api is the HTTP API Lambda: /trips, plus the legacy /photos routes
+// until no client uses them.
 package main
 
 import (
 	"context"
 	"log"
 	"os"
+	"strings"
 	"time"
 
+	"github.com/aws/aws-lambda-go/events"
 	"github.com/aws/aws-lambda-go/lambda"
 	"github.com/aws/aws-sdk-go-v2/config"
 	"github.com/aws/aws-sdk-go-v2/service/dynamodb"
@@ -14,6 +17,8 @@ import (
 	"github.com/google/uuid"
 
 	"github.com/a-godura/picture-ware/backend/internal/api"
+	legacyapi "github.com/a-godura/picture-ware/backend/internal/legacy/api"
+	legacyphotos "github.com/a-godura/picture-ware/backend/internal/legacy/photos"
 	"github.com/a-godura/picture-ware/backend/internal/photos"
 )
 
@@ -22,21 +27,43 @@ func main() {
 	if err != nil {
 		log.Fatalf("load aws config: %v", err)
 	}
+	db := dynamodb.NewFromConfig(cfg)
 	s3Client := s3.NewFromConfig(cfg)
+	presign := s3.NewPresignClient(s3Client)
 	bucket := mustEnv("BUCKET_NAME")
-	h := &api.Handler{
-		Store:   &photos.DynamoStore{Client: dynamodb.NewFromConfig(cfg), Table: mustEnv("TABLE_NAME")},
+
+	trips := &api.Handler{
+		Store:   &photos.DynamoStore{Client: db, Table: mustEnv("TABLE_NAME")},
 		Objects: &photos.S3Objects{Client: s3Client, Bucket: bucket},
 		Presigner: &photos.S3Presigner{
-			Client:     s3.NewPresignClient(s3Client),
-			Bucket:     bucket,
-			PostExpiry: 10 * time.Minute,
-			GetExpiry:  time.Hour,
+			Client: presign, Bucket: bucket, PostExpiry: 10 * time.Minute, GetExpiry: time.Hour,
 		},
 		NewID: uuid.NewString,
 		Now:   time.Now,
 	}
-	lambda.Start(h.Handle)
+	legacy := &legacyapi.Handler{
+		Store:   &legacyphotos.DynamoStore{Client: db, Table: mustEnv("LEGACY_TABLE_NAME")},
+		Objects: &legacyphotos.S3Objects{Client: s3Client, Bucket: bucket},
+		Presigner: &legacyphotos.S3Presigner{
+			Client: presign, Bucket: bucket, PostExpiry: 10 * time.Minute, GetExpiry: time.Hour,
+		},
+		NewID: uuid.NewString,
+		Now:   time.Now,
+	}
+
+	lambda.Start(func(ctx context.Context, req events.APIGatewayV2HTTPRequest) (events.APIGatewayV2HTTPResponse, error) {
+		if isLegacyRoute(req.RouteKey) {
+			return legacy.Handle(ctx, req)
+		}
+		return trips.Handle(ctx, req)
+	})
+}
+
+// isLegacyRoute reports whether a route key ("METHOD /path") is one of the
+// pre-trips /photos routes.
+func isLegacyRoute(routeKey string) bool {
+	_, path, _ := strings.Cut(routeKey, " ")
+	return path == "/photos" || strings.HasPrefix(path, "/photos/")
 }
 
 func mustEnv(k string) string {
