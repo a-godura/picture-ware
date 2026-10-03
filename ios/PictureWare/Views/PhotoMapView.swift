@@ -9,12 +9,16 @@ struct PhotoMapView: View {
     private let api: APIClient
     @State private var position: MapCameraPosition = .automatic
     @State private var experience = MapExperience()
+    @State private var export: ExportModel
+    @State private var showingExport = false
     @Environment(\.scenePhase) private var scenePhase
 
     init(auth: AuthService) {
         self.auth = auth
-        api = APIClient(baseURL: auth.config.apiURL, tokens: auth)
+        let api = APIClient(baseURL: auth.config.apiURL, tokens: auth)
+        self.api = api
         _model = State(initialValue: PhotosModel(api: api))
+        _export = State(initialValue: ExportModel(fetchPhotos: { try await api.listPhotos() }))
     }
 
     var body: some View {
@@ -23,6 +27,8 @@ struct PhotoMapView: View {
             try await model.delete(photo)
             uploads.forget(photoID: photo.id)
         }
+        .environment(\.exportModel, export) // shows "Save to Photos" in the photo viewer
+        .sheet(isPresented: $showingExport) { ExportView(model: export, photoCount: model.photos.count) }
         .overlay(alignment: .topTrailing) { menu }
         .overlay(alignment: .bottom) {
             VStack(spacing: 0) {
@@ -58,6 +64,8 @@ struct PhotoMapView: View {
         Menu {
             Button("Refresh", systemImage: "arrow.clockwise") { Task { await model.load() } }
             Button("Fit All Photos", systemImage: "arrow.up.left.and.arrow.down.right") { fitToPins() }
+                .disabled(model.photos.isEmpty)
+            Button("Save All Photos…", systemImage: "square.and.arrow.down.on.square") { showingExport = true }
                 .disabled(model.photos.isEmpty)
             Divider()
             Button("Sign Out", systemImage: "rectangle.portrait.and.arrow.right", role: .destructive) {

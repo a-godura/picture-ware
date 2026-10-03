@@ -10,6 +10,8 @@ struct PictureWareApp: App {
             #if DEBUG
             if UploadDemo.isEnabled {
                 UploadDemoView()
+            } else if ExportDemo.isEnabled {
+                ExportDemoView() // `-PWExportDemo YES`: Save to Photos / Files on sample files
             } else {
                 RootView(auth: auth)
             }

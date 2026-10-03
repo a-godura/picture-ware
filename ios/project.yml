@@ -45,6 +45,9 @@ targets:
         NSPhotoLibraryUsageDescription: >-
           Picture Ware reads a photo's location from your library when the
           photo file itself doesn't include it, so it can be placed on the map.
+        NSPhotoLibraryAddUsageDescription: >-
+          Picture Ware saves your trip's original photos, with their date and
+          location, to your library when you ask it to.
         PWApiUrl: $(PW_API_URL)
         PWAuthDomain: $(PW_AUTH_DOMAIN)
         PWClientId: $(PW_CLIENT_ID)
