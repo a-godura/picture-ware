@@ -5,16 +5,18 @@ DynamoDB, users in a Cognito user pool, deployed with AWS SAM to `us-east-2`
 as stack `picture-ware`. API and auth contract: [API.md](API.md).
 
 Every route sits behind a Cognito JWT authorizer (access tokens only).
-Photos are per user: DynamoDB key `(userId, id)`, S3 key
-`photos/<userId>/<id>`, where `userId` is the token's `sub`.
+Everything lives in a **trip**; only its members can see it. One DynamoDB
+table with generic `PK`/`SK` keys holds trips, members and photos (item
+shapes in [internal/photos/store.go](internal/photos/store.go)). Photo
+objects are at `photos/<tripId>/<id>`.
 
 ```
-cmd/api          POST/GET /photos (HTTP API, payload v2, user from JWT claims)
-cmd/processor    S3 ObjectCreated on photos/<userId>/<id> -> mark item ready
+cmd/api          /trips and /trips/{tripId}/photos (HTTP API, payload v2, user from JWT claims)
+cmd/processor    S3 ObjectCreated on photos/<tripId>/<id> -> mark item ready
 cmd/killswitch   budget SNS -> throttle API to 0, zero Lambda concurrency
 internal/...     handlers (depend on small interfaces) + AWS adapters
 template.yaml    SAM template (Cognito pool/domain/clients, bucket, table, API, functions, kill switch)
-scripts/         smoke.sh (end-to-end test), killswitch-reset.sh
+scripts/         smoke.sh (end-to-end test), killswitch-reset.sh, one-off migrations
 ```
 
 ## Prerequisites

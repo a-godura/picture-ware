@@ -81,22 +81,26 @@ Resources:
                 aws:SecureTransport: "false"
 
   # Owner-scoped: partition = Cognito sub, sort = photo id.
-  PhotosByUserTable:
+  # One table for trips, members and photos, keyed by generic PK/SK strings
+  # (see internal/photos/store.go for the item shapes).
+  AppTable:
     Type: AWS::DynamoDB::Table
-    DeletionPolicy: Delete
-    UpdateReplacePolicy: Delete
+    DeletionPolicy: Retain
+    UpdateReplacePolicy: Retain
     Properties:
       BillingMode: PAY_PER_REQUEST
       AttributeDefinitions:
-        - AttributeName: userId
+        - AttributeName: PK
           AttributeType: S
-        - AttributeName: id
+        - AttributeName: SK
           AttributeType: S
       KeySchema:
-        - AttributeName: userId
+        - AttributeName: PK
           KeyType: HASH
-        - AttributeName: id
+        - AttributeName: SK
           KeyType: RANGE
+      PointInTimeRecoverySpecification:
+        PointInTimeRecoveryEnabled: true
 
   # ---------- Auth ----------
   UserPool:
@@ -212,40 +216,58 @@ Resources:
       BuildMethod: go1.x
     Properties:
       CodeUri: cmd/api/
-      Description: picture-ware POST/GET /photos, DELETE /photos/{id}
+      Description: picture-ware /trips API
       Environment:
         Variables:
-          TABLE_NAME: !Ref PhotosByUserTable
+          TABLE_NAME: !Ref AppTable
           BUCKET_NAME: !Ref PhotosBucket
       Policies:
         - Version: "2012-10-17"
           Statement:
             - Effect: Allow
-              Action: [dynamodb:PutItem, dynamodb:Query, dynamodb:DeleteItem]
-              Resource: !GetAtt PhotosByUserTable.Arn
+              Action: [dynamodb:GetItem, dynamodb:PutItem, dynamodb:Query, dynamodb:DeleteItem]
+              Resource: !GetAtt AppTable.Arn
             - Effect: Allow
               # PutObject backs the presigned POST, GetObject the presigned GET.
               Action: [s3:PutObject, s3:GetObject, s3:DeleteObject]
               Resource: !Sub "${PhotosBucket.Arn}/photos/*"
       Events:
-        CreatePhoto:
+        ListTrips:
+          Type: HttpApi
+          Properties:
+            ApiId: !Ref HttpApi
+            Method: GET
+            Path: /trips
+        CreateTrip:
           Type: HttpApi
           Properties:
             ApiId: !Ref HttpApi
             Method: POST
-            Path: /photos
+            Path: /trips
+        GetTrip:
+          Type: HttpApi
+          Properties:
+            ApiId: !Ref HttpApi
+            Method: GET
+            Path: /trips/{tripId}
         ListPhotos:
           Type: HttpApi
           Properties:
             ApiId: !Ref HttpApi
             Method: GET
-            Path: /photos
+            Path: /trips/{tripId}/photos
+        CreatePhoto:
+          Type: HttpApi
+          Properties:
+            ApiId: !Ref HttpApi
+            Method: POST
+            Path: /trips/{tripId}/photos
         DeletePhoto:
           Type: HttpApi
           Properties:
             ApiId: !Ref HttpApi
             Method: DELETE
-            Path: /photos/{id}
+            Path: /trips/{tripId}/photos/{photoId}
 
   ApiFunctionLogGroup:
     Type: AWS::Logs::LogGroup
@@ -262,13 +284,13 @@ Resources:
       Description: picture-ware marks photos ready on S3 ObjectCreated
       Environment:
         Variables:
-          TABLE_NAME: !Ref PhotosByUserTable
+          TABLE_NAME: !Ref AppTable
       Policies:
         - Version: "2012-10-17"
           Statement:
             - Effect: Allow
               Action: dynamodb:UpdateItem
-              Resource: !GetAtt PhotosByUserTable.Arn
+              Resource: !GetAtt AppTable.Arn
       Events:
         PhotoUploaded:
           Type: S3
@@ -378,7 +400,7 @@ Outputs:
     Value: !Ref PhotosBucket
   TableName:
     Description: Photo metadata table (pk userId, sk id)
-    Value: !Ref PhotosByUserTable
+    Value: !Ref AppTable
   UserPoolId:
     Description: Cognito user pool id (JWT issuer is https://cognito-idp.<region>.amazonaws.com/<UserPoolId>)
     Value: !Ref UserPool

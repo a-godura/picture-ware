@@ -11,7 +11,7 @@ import (
 )
 
 type call struct {
-	user string
+	trip string
 	id   string
 	size int64
 }
@@ -21,8 +21,8 @@ type fakeStore struct {
 	errs  map[string]error
 }
 
-func (f *fakeStore) MarkReady(_ context.Context, userID, id string, size int64) error {
-	f.calls = append(f.calls, call{userID, id, size})
+func (f *fakeStore) MarkReady(_ context.Context, tripID, id string, size int64) error {
+	f.calls = append(f.calls, call{tripID, id, size})
 	return f.errs[id]
 }
 
@@ -39,9 +39,10 @@ func TestHandle(t *testing.T) {
 		wantErr   bool
 	}{
 		{name: "single photo", records: []events.S3EventRecord{record("photos/u1/abc", 1234)}, wantCalls: []call{{"u1", "abc", 1234}}},
-		{name: "url-encoded key", records: []events.S3EventRecord{record("photos/u1/a%2Bb", 1)}, wantCalls: []call{{"u1", "a+b", 1}}},
+		{name: "url-encoded key", records: []events.S3EventRecord{record("photos/u1/a%2Db", 1)}, wantCalls: []call{{"u1", "a-b", 1}}},
+		{name: "invalid id skipped", records: []events.S3EventRecord{record("photos/u1/a%2Bb", 1)}},
 		{
-			name:      "multiple users",
+			name:      "multiple trips",
 			records:   []events.S3EventRecord{record("photos/u1/a", 1), record("photos/u2/b", 2)},
 			wantCalls: []call{{"u1", "a", 1}, {"u2", "b", 2}},
 		},

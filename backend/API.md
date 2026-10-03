@@ -14,9 +14,10 @@ Every route requires a **Cognito access token**:
 Authorization: Bearer <access_token>
 ```
 
-Photos are private to the signed-in user: `POST /photos` creates a photo owned
-by the caller, and `GET /photos` returns only the caller's photos. The user id
-is the token's `sub` claim.
+Everything lives inside a **trip** (a vacation or an event). A trip and its
+photos are visible only to its **members**; to anyone else the trip doesn't
+exist (`404`). The creator is the first member. The user id is the token's
+`sub` claim.
 
 ### Cognito setup (stack outputs)
 
@@ -86,16 +87,54 @@ must not use it.
 
 ## Flow
 
-1. iOS signs the user in (above) and reads the GPS location (and capture time) from the photo's own metadata
-   on device. HEIC is common, so the server does no EXIF parsing in v1.
-2. `POST /photos` (with the bearer token) with the location → get an `id`
-   and a presigned S3 POST.
-3. Upload the image bytes directly to S3 with that presigned POST.
-4. S3 `ObjectCreated` triggers the processor Lambda, which marks the photo `ready`.
-5. `GET /photos` returns the caller's ready photos with a short-lived
-   `imageUrl` to show on the map.
+1. The app signs the user in (above).
+2. `POST /trips` creates a trip; `GET /trips` lists the caller's trips.
+3. The app reads the GPS location (and capture time) from the photo's own
+   metadata on device. HEIC is common, so the server does no EXIF parsing.
+4. `POST /trips/{tripId}/photos` with the location → get an `id` and a
+   presigned S3 POST.
+5. Upload the image bytes directly to S3 with that presigned POST.
+6. S3 `ObjectCreated` triggers the processor Lambda, which marks the photo `ready`.
+7. `GET /trips/{tripId}/photos` returns the trip's ready photos, in capture
+   order, with a short-lived `imageUrl` to show on the map.
 
-## `POST /photos`
+## Trips
+
+```json
+{
+  "id": "7d7d7d7d-3333-4c4c-9d9d-0123456789ab",
+  "name": "Lisbon",
+  "startDate": "2026-10-01",
+  "endDate": "2026-10-07",
+  "createdBy": "<sub>",
+  "createdAt": "2026-10-03T18:00:00Z"
+}
+```
+
+`startDate` / `endDate` are calendar days (`YYYY-MM-DD`); `endDate` is `null`
+when not set.
+
+### `POST /trips`
+
+Body (unknown fields rejected): `{"name": "Lisbon", "startDate": "2026-10-01", "endDate": "2026-10-07"}`
+
+- `name`: required, trimmed, 1–100 characters
+- `startDate`: required date; `endDate`: optional date, not before `startDate`
+
+`201` with the trip. The caller becomes its creator and first member.
+Errors: `400` validation, `401`, `413` body > 4 KiB, `429`, `500`.
+
+### `GET /trips`
+
+`200 {"trips": [<trip>, …]}`: trips the caller is a member of, newest
+`startDate` first. Always an array.
+
+### `GET /trips/{tripId}`
+
+`200` with the trip; `404 {"error":"trip not found"}` if it doesn't exist or
+the caller isn't a member.
+
+## `POST /trips/{tripId}/photos`
 
 Request body (unknown fields are rejected):
 
@@ -125,7 +164,7 @@ Body limit 4 KiB.
   "upload": {
     "url": "https://<bucket>.s3.us-east-2.amazonaws.com",
     "fields": {
-      "key": "photos/<userId>/6f1c0e8e-5d0b-4b8a-9f1e-2a3b4c5d6e7f",
+      "key": "photos/<tripId>/6f1c0e8e-5d0b-4b8a-9f1e-2a3b4c5d6e7f",
       "Content-Type": "image/jpeg",
       "policy": "…",
       "X-Amz-Algorithm": "AWS4-HMAC-SHA256",
@@ -139,7 +178,8 @@ Body limit 4 KiB.
 ```
 
 The record is stored with status `pending` and is **not** returned by
-`GET /photos` until the upload lands.
+`GET /trips/{tripId}/photos` until the upload lands. Only trip members can
+add photos (`404` otherwise).
 
 ### Uploading to S3
 
@@ -153,8 +193,8 @@ curl -F key=… -F Content-Type=image/jpeg -F policy=… … -F file=@photo.jpg 
 
 The presigned policy enforces:
 
-- exact key `photos/<userId>/<id>` (`userId` = the caller's `sub`)
-- exact `Content-Type` (the one sent to `POST /photos`)
+- exact key `photos/<tripId>/<id>`
+- exact `Content-Type` (the one sent when creating the photo)
 - size 1 byte … 15 MiB (15,728,640 bytes)
 - expires 10 minutes after creation
 
@@ -168,11 +208,12 @@ oversized files (S3 may also just reset the connection).
 |--------|--------------------------------------------------|
 | 400    | malformed JSON, unknown field, validation failure |
 | 401    | missing/invalid token (see Authentication)       |
+| 404    | trip not found, or caller isn't a member         |
 | 413    | body > 4 KiB                                     |
 | 429    | throttled (see below)                            |
 | 500    | internal error                                   |
 
-## `GET /photos`
+## `GET /trips/{tripId}/photos`
 
 ### 200 OK
 
@@ -185,31 +226,35 @@ oversized files (S3 may also just reset the connection).
       "lng": -122.4194,
       "takenAt": "2026-09-01T10:00:00Z",
       "createdAt": "2026-10-01T18:00:00Z",
+      "uploaderId": "<sub>",
       "imageUrl": "https://<bucket>.s3.us-east-2.amazonaws.com/photos/…?X-Amz-…"
     }
   ]
 }
 ```
 
-- Only the caller's photos with status `ready` are returned. `photos` is
-  always an array.
+- All of the trip's photos with status `ready`, from every member, in capture
+  order (`takenAt`); photos without `takenAt` come last, by upload time.
+  `photos` is always an array.
+- `uploaderId` is the `sub` of the member who added it.
 - `takenAt` is `null` when it was not supplied.
 - `imageUrl` is a presigned GET valid for **1 hour** (it is signed with the
   Lambda's temporary credentials, so in rare cases it can expire sooner if
   those credentials rotate). Re-fetch the list rather than caching URLs.
-- No pagination in v1 (one DynamoDB Query on the caller's `userId` partition).
-- Errors: `401` (see Authentication), `429`, `500`.
+- No pagination yet (one DynamoDB Query on the trip's partition).
+- Errors: `401` (see Authentication), `404`, `429`, `500`.
 
-## `DELETE /photos/{id}`
+## `DELETE /trips/{tripId}/photos/{photoId}`
 
-Deletes one of the caller's photos: the S3 object first, then the record, so
-a failure part-way leaves the photo listed and the client can simply retry.
+Deletes a photo from a trip. Only the member who **uploaded** it can delete
+it (for now). The S3 object goes first, then the record, so a failure
+part-way leaves the photo listed and the client can simply retry.
 
 - `204 No Content` (empty body) on success.
-- `404 {"error":"photo not found"}` if the caller has no photo with that id —
-  including ids that belong to another user (they're indistinguishable).
+- `403` if the caller is a member but didn't upload the photo.
+- `404` if the trip or photo doesn't exist, or the caller isn't a member.
 - Deleting a `pending` photo (upload never finished) also works.
-- Errors: `401` (see Authentication), `404`, `429`, `500`.
+- Errors: `401` (see Authentication), `403`, `404`, `429`, `500`.
 
 ## Limits and cost guardrails
 
