@@ -9,6 +9,7 @@ import (
 	"bytes"
 	"context"
 	"errors"
+	"fmt"
 	"io"
 	"net/http"
 	"net/http/httptest"
@@ -152,15 +153,52 @@ func Planned(op *openapi3.Operation) bool {
 // template.yaml are exactly the contract's operations that aren't planned.
 func CheckDeployedRoutes(t testing.TB) {
 	t.Helper()
-	var documented []string
-	for path, item := range Spec(t).Paths.Map() {
+	if err := compareRoutes(Spec(t), deployedRoutes(t)); err != nil {
+		t.Fatal(err)
+	}
+}
+
+// compareRoutes returns an error unless deployed ("METHOD /path") is exactly
+// the contract's operations without x-planned: true. It fails safe: a
+// planned operation that is deployed anyway is an error (remove the marker),
+// as is anything deployed but undocumented, or documented and not planned
+// but missing.
+func compareRoutes(doc *openapi3.T, deployed []string) error {
+	var documented, planned []string
+	for path, item := range doc.Paths.Map() {
 		for method, op := range item.Operations() {
-			if !Planned(op) {
+			if Planned(op) {
+				planned = append(planned, method+" "+path)
+			} else {
 				documented = append(documented, method+" "+path)
 			}
 		}
 	}
+	isDeployed := map[string]bool{}
+	for _, r := range deployed {
+		isDeployed[r] = true
+	}
+	sort.Strings(planned)
+	for _, r := range planned {
+		if isDeployed[r] {
+			return fmt.Errorf("%s is marked %s: true in %s but deployed in %s: remove the marker", r, PlannedExtension, specFile, templateFile)
+		}
+	}
+	deployed = append([]string(nil), deployed...)
+	sort.Strings(documented)
+	sort.Strings(deployed)
+	if strings.Join(documented, "\n") == strings.Join(deployed, "\n") {
+		return nil
+	}
+	return fmt.Errorf("routes differ (operations marked %s: true are left out)\n"+
+		"contract, deployed operations (%s):\n  %s\ncontract, planned:\n  %s\n%s:\n  %s",
+		PlannedExtension, specFile, strings.Join(documented, "\n  "), strings.Join(planned, "\n  "),
+		templateFile, strings.Join(deployed, "\n  "))
+}
 
+// deployedRoutes lists the HttpApi events in template.yaml.
+func deployedRoutes(t testing.TB) []string {
+	t.Helper()
 	root, err := repoRoot()
 	if err != nil {
 		t.Fatal(err)
@@ -183,13 +221,7 @@ func CheckDeployedRoutes(t testing.TB) {
 			deployed = append(deployed, strings.ToUpper(value(props, "Method"))+" "+value(props, "Path"))
 		}
 	})
-
-	sort.Strings(documented)
-	sort.Strings(deployed)
-	if strings.Join(documented, "\n") != strings.Join(deployed, "\n") {
-		t.Fatalf("routes differ (operations marked %s: true don't count; remove the marker when deploying them)\ncontract (%s):\n  %s\n%s:\n  %s",
-			PlannedExtension, specFile, strings.Join(documented, "\n  "), templateFile, strings.Join(deployed, "\n  "))
-	}
+	return deployed
 }
 
 func walk(n *yaml.Node, f func(*yaml.Node)) {
