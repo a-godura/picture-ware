@@ -618,7 +618,7 @@
       "post": {
         "operationId": "createTripPhoto",
         "summary": "Add a photo to a trip and get a presigned S3 upload",
-        "description": "Any member can add photos. The record is `pending` (not listed) until\nthe upload lands in S3. Upload exactly as for `POST /photos`: a\n`multipart/form-data` POST to `upload.url` with every entry of\n`upload.fields` first, then the image in a field named `file`. The\npolicy pins the exact key and Content-Type, 1 byte–15 MiB, and expires\nafter 10 minutes.\n",
+        "description": "Any member can add photos. The record is `pending` (not listed) until\nthe upload lands in S3. Upload exactly as for `POST /photos`: a\n`multipart/form-data` POST to `upload.url` with every entry of\n`upload.fields` first, then the image in a field named `file`. The\npolicy pins the exact key and Content-Type, 1 byte–15 MiB, and expires\nafter 10 minutes.\n\nUpload quotas (server-configured; defaults shown): each user may get\n300 upload URLs per UTC day and store 5 GiB, and the service stores at\nmost 50 GiB in total. Each upload URL reserves 15 MiB until its upload\nlands (then the real size counts) or about an hour passes. Over a\nquota the response is `429` with an `error` naming the limit; nothing\nis created. Deleting photos frees storage (not the daily count).\n",
         "requestBody": {
           "required": true,
           "content": {
@@ -689,7 +689,43 @@
             "$ref": "#/components/responses/TooLarge"
           },
           "429": {
-            "$ref": "#/components/responses/Throttled"
+            "description": "Rate limited by API Gateway (`message`), or an upload quota is\nreached (`error`): `daily upload limit reached` (try again the next\nUTC day), `storage limit reached` (the caller's storage; delete\nphotos to free it), or `service storage limit reached` (total\nstorage; try again later).\n",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "oneOf": [
+                    {
+                      "$ref": "#/components/schemas/GatewayError"
+                    },
+                    {
+                      "$ref": "#/components/schemas/Error"
+                    }
+                  ]
+                },
+                "examples": {
+                  "throttled": {
+                    "value": {
+                      "message": "Too Many Requests"
+                    }
+                  },
+                  "dailyLimit": {
+                    "value": {
+                      "error": "daily upload limit reached"
+                    }
+                  },
+                  "userStorage": {
+                    "value": {
+                      "error": "storage limit reached"
+                    }
+                  },
+                  "totalStorage": {
+                    "value": {
+                      "error": "service storage limit reached"
+                    }
+                  }
+                }
+              }
+            }
           },
           "500": {
             "$ref": "#/components/responses/InternalError"

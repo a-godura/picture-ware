@@ -24,7 +24,10 @@ other running:
    operations `x-planned: true`: they're agreed but not deployed yet, so the
    route check doesn't expect them in `template.yaml`, and the app can build
    against them in mock mode. Planned operations can still be changed or
-   removed without the breaking-change label.
+   removed without the breaking-change label. Then run
+   `ios/scripts/sync-contract.sh` and commit the regenerated `openapi.json`,
+   which the app and its tests read (the `ios` workflow fails if it's out of
+   date).
 2. Implement it in the backend; its tests must match the contract. The same
    PR removes `x-planned` from the operations it deploys.
 3. Build the app against the contract. Backend and app can ship in separate

@@ -25,6 +25,7 @@ targets:
       # The API contract, for mock mode (Debug only; excluded from Release below).
       # Regenerate from openapi.yaml with scripts/sync-contract.sh.
       - path: ../api/openapi.json
+        group: Contract
         buildPhase: resources
     configFiles:
       Debug: Config/Config.xcconfig
@@ -74,6 +75,7 @@ targets:
     sources:
       - path: PictureWareTests
       - path: ../api/openapi.json
+        group: Contract
         buildPhase: resources
     dependencies:
       - target: PictureWare

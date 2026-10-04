@@ -9,7 +9,9 @@ These rules apply to everyone working on this repo, human or agent.
    operations land marked `x-planned: true` (agreed, not deployed yet); the
    backend PR that deploys them removes the marker. Until then they may still
    change freely: the breaking-change check ignores planned operations on
-   `main`.
+   `main`. Whenever you change `openapi.yaml`, run
+   `ios/scripts/sync-contract.sh` and commit the regenerated `api/openapi.json`
+   (CI fails if it's stale).
 2. **Backend and app ship separately.** A PR touches `backend/` *or* `ios/`
    (plus `api/` when needed), never both. Each side must be fully testable
    without the other: backend tests use fakes and the contract tests; app tests
