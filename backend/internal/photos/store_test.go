@@ -257,15 +257,17 @@ func TestMarkReady(t *testing.T) {
 	if err := s.MarkReady(context.Background(), "trip-1", "photo-1", 42); err != nil {
 		t.Fatal(err)
 	}
-	if len(f.calls) != 2 || f.calls[1].Op != "TransactWriteItems" {
+	// A record from before quotas (no reservation): usage gets the size,
+	// then the photo + listing transaction.
+	if len(f.calls) != 4 || f.calls[3].Op != "TransactWriteItems" {
 		t.Fatalf("calls = %+v", f.calls)
 	}
-	items := f.calls[1].Body["TransactItems"].([]any)
-	if len(items) != 4 {
-		t.Fatalf("%d transact items, want photo, listing, user and total usage", len(items))
+	assertAddCall(t, f.calls[1], "USAGE#user-2", 42, 42)
+	assertAddCall(t, f.calls[2], "USAGE#ALL", 42, 42)
+	items := f.calls[3].Body["TransactItems"].([]any)
+	if len(items) != 2 {
+		t.Fatalf("%d transact items, want photo and listing", len(items))
 	}
-	assertAdd(t, items[2], "USAGE#user-2", 42, 42)
-	assertAdd(t, items[3], "USAGE#ALL", 42, 42)
 	update := items[0].(map[string]any)["Update"].(map[string]any)
 	put := items[1].(map[string]any)["Put"].(map[string]any)
 	vals, _ := update["ExpressionAttributeValues"].(map[string]any)
@@ -294,10 +296,13 @@ func TestMarkReady(t *testing.T) {
 
 	// Lost a race (deleted meanwhile): retryable error, not "not found".
 	s, _ = newFakeStore(t, func(op string, _ int) (int, string) {
-		if op == "GetItem" {
+		switch op {
+		case "GetItem":
 			return http.StatusOK, getResponse(t, testPhoto)
+		case "TransactWriteItems":
+			return http.StatusBadRequest, transactionConditionFailed
 		}
-		return http.StatusBadRequest, transactionConditionFailed
+		return http.StatusOK, "{}"
 	})
 	if err := s.MarkReady(context.Background(), "trip-1", "photo-1", 42); err == nil || errors.Is(err, ErrNotFound) {
 		t.Fatalf("race: err %v", err)

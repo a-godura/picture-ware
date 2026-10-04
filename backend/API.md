@@ -300,11 +300,17 @@ working. New clients use `/trips`. They'll be removed once no client calls them.
 - **Upload quotas (trips only):** per user 300 upload URLs/day
   (`UploadsPerUserPerDay`) and 5 GiB stored (`StoragePerUserBytes`); 50 GiB
   stored in total (`StorageTotalBytes`). Counters live in AppTable
-  (`USAGE#...` items, see `internal/photos/quota.go`). Concurrent requests
-  cannot overshoot: every upload URL reserves the 15 MiB maximum in the same
-  transaction that checks the caps. The only overshoot is an upload that
-  lands after its reservation was released as stale (more than an hour
-  after the 10-minute URL was issued), at most 15 MiB each.
+  (`USAGE#...` items, see `internal/photos/quota.go`). Every upload URL
+  reserves the 15 MiB maximum with conditional writes (the per-user checks
+  inside the transaction that creates the photo, the total in a conditional
+  update just before it, given back if the transaction fails), so concurrent
+  requests cannot overshoot. The only overshoot is an upload that lands after
+  its reservation was released as stale (more than an hour after the
+  10-minute URL was issued), at most 15 MiB each. A failure part-way through
+  the non-transactional counter writes can only over-count.
+- **AppTable write cap:** `MaxWriteRequestUnits: 50`. A trip photo costs
+  about 14 WRU (7 to issue the upload URL, 7 when it lands), so about 3.5
+  photos/s across the service.
 - **Logs:** every function's log group keeps 14 days.
 - **S3:** incomplete multipart uploads are aborted after 1 day.
 - **Kill switch:** an AWS Budget `picture-ware-killswitch` (monthly actual
