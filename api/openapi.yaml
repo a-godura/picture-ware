@@ -9,7 +9,8 @@ info:
     rejected in CI (oasdiff); evolve it additively, then remove old parts once
     no client uses them.
 
-    Every route requires a Cognito **access token** (`Authorization: Bearer`).
+    Every route requires a Cognito **access token** (`Authorization: Bearer`),
+    except the public invite landing page `GET /j/{code}`.
     API Gateway rejects missing/invalid tokens itself with
     `{"message": "Unauthorized"}`; errors from the API use `{"error": "..."}`.
 servers:
@@ -457,6 +458,374 @@ paths:
         "429": { $ref: "#/components/responses/Throttled" }
         "500": { $ref: "#/components/responses/InternalError" }
 
+  # ---------- Me ----------
+  # The caller's own profile. Members see each other only by the display
+  # name chosen here, never by email.
+
+  /me:
+    get:
+      operationId: getMe
+      x-planned: true
+      summary: Get the caller's profile
+      description: "`displayName` is `null` until the user sets one (the app asks on first run)."
+      responses:
+        "200":
+          description: OK
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Profile" }
+              examples:
+                named:
+                  value: { userId: 511b25d0-40a1-705d-f49c-7e89f72c4924, displayName: Ana }
+                notYetNamed:
+                  summary: New user who hasn't chosen a name
+                  value: { userId: 2c4d8e10-a0b1-70c2-9d3e-5f6a7b8c9d0e, displayName: null }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "429": { $ref: "#/components/responses/Throttled" }
+        "500": { $ref: "#/components/responses/InternalError" }
+    patch:
+      operationId: updateMe
+      x-planned: true
+      summary: Set the caller's display name
+      description: |
+        What friends see in trips (member lists, invite previews). Trimmed;
+        1–50 characters after trimming; no control characters. Takes effect
+        everywhere at once (names are resolved when read).
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/UpdateProfileRequest" }
+            examples:
+              simple:
+                value: { displayName: Ana }
+              withEmoji:
+                value: { displayName: "Ben 🏔️" }
+      responses:
+        "200":
+          description: The updated profile
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Profile" }
+              example: { userId: 511b25d0-40a1-705d-f49c-7e89f72c4924, displayName: Ana }
+        "400":
+          description: Malformed JSON, unknown field, or validation failure
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Error" }
+              examples:
+                blank:
+                  value: { error: "validation failed: displayName is required" }
+                tooLong:
+                  value: { error: "validation failed: displayName must be at most 50 characters" }
+                controlChars:
+                  value: { error: "validation failed: displayName must not contain control characters" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "413": { $ref: "#/components/responses/TooLarge" }
+        "429": { $ref: "#/components/responses/Throttled" }
+        "500": { $ref: "#/components/responses/InternalError" }
+
+  # ---------- Members and invites ----------
+  # People join a trip through its invite link. Any member can share the
+  # link; only the trip's creator (the owner) can rotate it or remove
+  # members. Members can leave; the owner can't (v1). A member's photos stay
+  # in the trip after they leave or are removed.
+
+  /trips/{tripId}/members:
+    parameters:
+      - $ref: "#/components/parameters/TripId"
+    get:
+      operationId: listTripMembers
+      x-planned: true
+      summary: List a trip's members
+      description: The owner first, then everyone else in the order they joined.
+      responses:
+        "200":
+          description: OK
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/MemberList" }
+              examples:
+                threeMembers:
+                  summary: Lisbon trip, the owner and two friends who joined with the link
+                  value:
+                    members:
+                      - userId: 511b25d0-40a1-705d-f49c-7e89f72c4924
+                        name: Ana
+                        role: owner
+                        joinedAt: "2026-09-20T17:05:12Z"
+                      - userId: 2c4d8e10-a0b1-70c2-9d3e-5f6a7b8c9d0e
+                        name: Ben
+                        role: member
+                        joinedAt: "2026-09-21T08:44:02Z"
+                      - userId: 7e1f3a20-b0c1-7080-a1b2-c3d4e5f60718
+                        name: null
+                        role: member
+                        joinedAt: "2026-10-01T12:30:51Z"
+                justMe:
+                  summary: Nobody has joined yet
+                  value:
+                    members:
+                      - userId: 511b25d0-40a1-705d-f49c-7e89f72c4924
+                        name: Ana
+                        role: owner
+                        joinedAt: "2026-09-20T17:05:12Z"
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "404": { $ref: "#/components/responses/TripNotFound" }
+        "429": { $ref: "#/components/responses/Throttled" }
+        "500": { $ref: "#/components/responses/InternalError" }
+
+  /trips/{tripId}/members/{userId}:
+    parameters:
+      - $ref: "#/components/parameters/TripId"
+      - name: userId
+        in: path
+        required: true
+        description: The member's user id (Cognito sub). Your own id means "leave".
+        schema: { type: string }
+    delete:
+      operationId: removeTripMember
+      x-planned: true
+      summary: Leave a trip, or (owner only) remove a member
+      description: |
+        With your own user id: you leave the trip. With someone else's: only
+        the owner may remove them. Either way the person immediately loses
+        access (the trip is `404` for them and disappears from their
+        `GET /trips`); photos they added stay in the trip. The owner can't
+        leave (`409`). When the owner **removes** someone, the trip's invite
+        link is rotated automatically in the same step, so the removed person
+        can't rejoin with the link they had; members get the new link from
+        `POST /trips/{tripId}/invite`. Leaving doesn't rotate it.
+      responses:
+        "204": { description: Left or removed }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403":
+          description: The caller is a member but not the owner, and tried to remove someone else
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Error" }
+              example: { error: only the trip's creator can remove members }
+        "404":
+          description: No such trip (or the caller isn't a member), or that user isn't a member
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Error" }
+              examples:
+                trip:
+                  value: { error: trip not found }
+                member:
+                  value: { error: member not found }
+        "409":
+          description: The owner tried to leave (or be removed from) their own trip
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Error" }
+              example: { error: "the trip's creator can't leave it" }
+        "429": { $ref: "#/components/responses/Throttled" }
+        "500": { $ref: "#/components/responses/InternalError" }
+
+  /trips/{tripId}/invite:
+    parameters:
+      - $ref: "#/components/parameters/TripId"
+    post:
+      operationId: getTripInvite
+      x-planned: true
+      summary: Get the trip's invite link, creating it on first use
+      description: |
+        Any member can call this and share the result. A trip has at most one
+        active invite; calling again returns the same one until the owner
+        rotates it. Share `url` (an https page that opens the app, and tells
+        people without the app how to get it); `appUrl` opens the app
+        directly. Anyone signed in who has the code can join, so treat it
+        like a group-chat invite link. No request body.
+      responses:
+        "200":
+          description: The trip's current invite (created now if it had none)
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Invite" }
+              examples:
+                lisbon:
+                  value:
+                    code: vfowhoettfx5bwqpezmwzdbgce
+                    url: https://371v2nw03l.execute-api.us-east-2.amazonaws.com/j/vfowhoettfx5bwqpezmwzdbgce
+                    appUrl: picture-ware://join/vfowhoettfx5bwqpezmwzdbgce
+                    tripId: ce9f9b98-5813-4fa3-98ce-282743afbfa0
+                    createdBy: 511b25d0-40a1-705d-f49c-7e89f72c4924
+                    createdAt: "2026-09-20T17:06:00Z"
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "404": { $ref: "#/components/responses/TripNotFound" }
+        "429": { $ref: "#/components/responses/Throttled" }
+        "500": { $ref: "#/components/responses/InternalError" }
+
+  /trips/{tripId}/invite/rotate:
+    parameters:
+      - $ref: "#/components/parameters/TripId"
+    post:
+      operationId: rotateTripInvite
+      x-planned: true
+      summary: Replace the trip's invite link with a new one (owner only)
+      description: |
+        The old code stops working immediately (`404` on preview and accept);
+        people who already joined stay. Removing a member also rotates it. Returns
+        the new invite. No request body.
+      responses:
+        "201":
+          description: The new invite
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Invite" }
+              examples:
+                rotated:
+                  value:
+                    code: tsmkrri67mudfbjquqvxffs4fa
+                    url: https://371v2nw03l.execute-api.us-east-2.amazonaws.com/j/tsmkrri67mudfbjquqvxffs4fa
+                    appUrl: picture-ware://join/tsmkrri67mudfbjquqvxffs4fa
+                    tripId: ce9f9b98-5813-4fa3-98ce-282743afbfa0
+                    createdBy: 511b25d0-40a1-705d-f49c-7e89f72c4924
+                    createdAt: "2026-10-02T09:15:27Z"
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403":
+          description: The caller is a member but not the owner
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Error" }
+              example: { error: "only the trip's creator can reset the invite link" }
+        "404": { $ref: "#/components/responses/TripNotFound" }
+        "429": { $ref: "#/components/responses/Throttled" }
+        "500": { $ref: "#/components/responses/InternalError" }
+
+  /invites/{code}:
+    parameters:
+      - $ref: "#/components/parameters/InviteCode"
+    get:
+      operationId: previewInvite
+      x-planned: true
+      summary: See which trip an invite is for, before joining
+      description: |
+        Any signed-in user with the code can preview it. Shows only the
+        trip's name and dates, who shared the trip, and how many members it
+        has; never its photos. Unknown and rotated codes are `404`.
+      responses:
+        "200":
+          description: OK
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/InvitePreview" }
+              examples:
+                notYetMember:
+                  value:
+                    code: vfowhoettfx5bwqpezmwzdbgce
+                    trip:
+                      id: ce9f9b98-5813-4fa3-98ce-282743afbfa0
+                      name: Lisbon long weekend
+                      startDate: "2026-10-01"
+                      endDate: "2026-10-06"
+                    ownerName: Ana
+                    memberCount: 3
+                    alreadyMember: false
+                alreadyMember:
+                  summary: The caller opened a link to a trip they're already in
+                  value:
+                    code: vfowhoettfx5bwqpezmwzdbgce
+                    trip:
+                      id: ce9f9b98-5813-4fa3-98ce-282743afbfa0
+                      name: Lisbon long weekend
+                      startDate: "2026-10-01"
+                      endDate: "2026-10-06"
+                    ownerName: Ana
+                    memberCount: 3
+                    alreadyMember: true
+                openEndedNoName:
+                  summary: Open-ended trip whose owner has no known name
+                  value:
+                    code: ufnbhbjyuduvmdxprutc76jqwe
+                    trip:
+                      id: f531218c-dbb1-4190-81f4-f0d56ada94c5
+                      name: Mia's 30th 🎉
+                      startDate: "2026-10-03"
+                      endDate: null
+                    ownerName: null
+                    memberCount: 1
+                    alreadyMember: false
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "404": { $ref: "#/components/responses/InviteNotFound" }
+        "429": { $ref: "#/components/responses/Throttled" }
+        "500": { $ref: "#/components/responses/InternalError" }
+
+  /invites/{code}/accept:
+    parameters:
+      - $ref: "#/components/parameters/InviteCode"
+    post:
+      operationId: acceptInvite
+      x-planned: true
+      summary: Join the trip an invite is for
+      description: |
+        Makes the caller a member and returns the trip (it then appears in
+        `GET /trips`). Idempotent: accepting when already a member also
+        returns `200` with the trip. A trip has at most 50 members (`409`
+        when full). No request body.
+      responses:
+        "200":
+          description: The caller is (now) a member of this trip
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Trip" }
+              examples:
+                joined:
+                  value:
+                    id: ce9f9b98-5813-4fa3-98ce-282743afbfa0
+                    name: Lisbon long weekend
+                    startDate: "2026-10-01"
+                    endDate: "2026-10-06"
+                    createdBy: 511b25d0-40a1-705d-f49c-7e89f72c4924
+                    createdAt: "2026-09-20T17:05:12Z"
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "404": { $ref: "#/components/responses/InviteNotFound" }
+        "409":
+          description: The trip already has the maximum number of members
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Error" }
+              example: { error: trip is full }
+        "429": { $ref: "#/components/responses/Throttled" }
+        "500": { $ref: "#/components/responses/InternalError" }
+
+  /j/{code}:
+    parameters:
+      - $ref: "#/components/parameters/InviteCode"
+    get:
+      operationId: inviteLandingPage
+      x-planned: true
+      summary: Public landing page for an invite link (HTML, no sign-in)
+      description: |
+        What `Invite.url` points to, so the link is tappable in any chat app.
+        A tiny HTML page with an "Open in picture-ware" button
+        (`picture-ware://join/{code}`) and instructions for people who don't
+        have the app yet. It shows **no trip data** and doesn't check whether
+        the code exists (so it reveals nothing and costs no database read);
+        the app checks the code with `GET /invites/{code}`. Codes that aren't
+        well-formed get a `404` page. Throttled like every other route;
+        `Cache-Control: no-store`, `Referrer-Policy: no-referrer`,
+        `X-Robots-Tag: noindex`.
+      security: []
+      responses:
+        "200":
+          description: The landing page
+          content:
+            text/html:
+              schema: { type: string }
+              example: |
+                <!doctype html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>Join a trip on picture-ware</title></head><body><main><h1>You're invited to a trip</h1><p><a href="picture-ware://join/vfowhoettfx5bwqpezmwzdbgce">Open in picture-ware</a></p><p>Don't have the app yet? Install picture-ware, sign in, then tap this link again.</p></main></body></html>
+        "404":
+          description: Not a well-formed invite code
+          content:
+            text/html:
+              schema: { type: string }
+              example: |
+                <!doctype html><html lang="en"><head><meta charset="utf-8"><title>Link not found</title></head><body><main><h1>This invite link isn't valid</h1></main></body></html>
+        "429": { $ref: "#/components/responses/Throttled" }
+
 components:
   securitySchemes:
     cognito:
@@ -470,6 +839,12 @@ components:
       name: tripId
       in: path
       required: true
+      schema: { type: string }
+    InviteCode:
+      name: code
+      in: path
+      required: true
+      description: An invite code (`Invite.code`), e.g. from a shared link.
       schema: { type: string }
 
   schemas:
@@ -602,6 +977,101 @@ components:
       properties:
         message: { type: string }
 
+    Profile:
+      type: object
+      additionalProperties: false
+      required: [userId, displayName]
+      properties:
+        userId: { type: string, description: "The caller's user id (Cognito sub)." }
+        displayName:
+          type: string
+          nullable: true
+          description: "What other members see; `null` until set."
+
+    UpdateProfileRequest:
+      type: object
+      additionalProperties: false
+      required: [displayName]
+      properties:
+        displayName:
+          type: string
+          minLength: 1
+          maxLength: 50
+          description: Trimmed by the server; must not be blank or contain control characters. At most 50 characters.
+
+    Member:
+      type: object
+      additionalProperties: false
+      required: [userId, name, role, joinedAt]
+      properties:
+        userId: { type: string, description: "User id (Cognito sub); matches `Trip.createdBy` and `TripPhoto.uploaderId`." }
+        name:
+          type: string
+          nullable: true
+          description: |
+            The display name the member chose (`PATCH /me`); `null` if they
+            haven't set one yet (show "Member"). No part of anyone's email is
+            ever shown to other members.
+        role:
+          type: string
+          enum: [owner, member]
+          description: "`owner` is the trip's creator: they can rotate the invite link and remove members."
+        joinedAt: { type: string, format: date-time }
+
+    MemberList:
+      type: object
+      additionalProperties: false
+      required: [members]
+      properties:
+        members:
+          type: array
+          items: { $ref: "#/components/schemas/Member" }
+
+    Invite:
+      type: object
+      additionalProperties: false
+      required: [code, url, appUrl, tripId, createdBy, createdAt]
+      properties:
+        code:
+          type: string
+          pattern: "^[a-z2-7]{26}$"
+          description: 128 random bits, lowercase base32. Anyone signed in who has it can join the trip.
+        url:
+          type: string
+          format: uri
+          description: Shareable https link to the public landing page (`GET /j/{code}`).
+        appUrl:
+          type: string
+          description: "Deep link that opens the app directly: `picture-ware://join/{code}`."
+        tripId: { type: string }
+        createdBy: { type: string, description: "User id (Cognito sub) of the member who created this invite." }
+        createdAt: { type: string, format: date-time }
+
+    InvitePreview:
+      type: object
+      additionalProperties: false
+      required: [code, trip, ownerName, memberCount, alreadyMember]
+      properties:
+        code: { type: string }
+        trip: { $ref: "#/components/schemas/TripSummary" }
+        ownerName:
+          type: string
+          nullable: true
+          description: The owner's display name (see `Member.name`); `null` if they haven't set one.
+        memberCount: { type: integer, minimum: 1 }
+        alreadyMember: { type: boolean, description: "true when the caller is already in this trip (accepting is then a no-op)." }
+
+    TripSummary:
+      type: object
+      additionalProperties: false
+      description: What an invite reveals about a trip before joining.
+      required: [id, name, startDate, endDate]
+      properties:
+        id: { type: string }
+        name: { type: string }
+        startDate: { type: string, format: date }
+        endDate: { type: string, format: date, nullable: true }
+
   responses:
     BadRequest:
       description: Malformed JSON, unknown field, or validation failure
@@ -648,3 +1118,9 @@ components:
         application/json:
           schema: { $ref: "#/components/schemas/Error" }
           example: { error: internal error }
+    InviteNotFound:
+      description: Not a valid invite code, or one that was rotated away (indistinguishable)
+      content:
+        application/json:
+          schema: { $ref: "#/components/schemas/Error" }
+          example: { error: invite not found }
