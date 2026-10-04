@@ -388,6 +388,13 @@ paths:
         `upload.fields` first, then the image in a field named `file`. The
         policy pins the exact key and Content-Type, 1 byte–15 MiB, and expires
         after 10 minutes.
+
+        Upload quotas (server-configured; defaults shown): each user may get
+        300 upload URLs per UTC day and store 5 GiB, and the service stores at
+        most 50 GiB in total. Each upload URL reserves 15 MiB until its upload
+        lands (then the real size counts) or about an hour passes. Over a
+        quota the response is `429` with an `error` naming the limit; nothing
+        is created. Deleting photos frees storage (not the daily count).
       requestBody:
         required: true
         content:
@@ -422,7 +429,28 @@ paths:
         "401": { $ref: "#/components/responses/Unauthorized" }
         "404": { $ref: "#/components/responses/TripNotFound" }
         "413": { $ref: "#/components/responses/TooLarge" }
-        "429": { $ref: "#/components/responses/Throttled" }
+        "429":
+          description: |
+            Rate limited by API Gateway (`message`), or an upload quota is
+            reached (`error`): `daily upload limit reached` (try again the next
+            UTC day), `storage limit reached` (the caller's storage; delete
+            photos to free it), or `service storage limit reached` (total
+            storage; try again later).
+          content:
+            application/json:
+              schema:
+                oneOf:
+                  - $ref: "#/components/schemas/GatewayError"
+                  - $ref: "#/components/schemas/Error"
+              examples:
+                throttled:
+                  value: { message: Too Many Requests }
+                dailyLimit:
+                  value: { error: daily upload limit reached }
+                userStorage:
+                  value: { error: storage limit reached }
+                totalStorage:
+                  value: { error: service storage limit reached }
         "500": { $ref: "#/components/responses/InternalError" }
 
   /trips/{tripId}/photos/{photoId}:

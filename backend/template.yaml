@@ -40,6 +40,21 @@ Parameters:
     Default: ""
     AllowedPattern: "^$|^[^@\\s]+@[^@\\s]+$"
     Description: Optional email address subscribed to the tripwire topic (AWS sends a confirmation email first). Empty = no subscription.
+  UploadsPerUserPerDay:
+    Type: Number
+    Default: 300
+    MinValue: 0
+    Description: Trip photo upload URLs each user may get per UTC day (POST /trips/{tripId}/photos; 429 above it).
+  StoragePerUserBytes:
+    Type: Number
+    Default: 5368709120
+    MinValue: 0
+    Description: Trip photo bytes each user may store, counting 15 MiB per in-flight upload (default 5 GiB).
+  StorageTotalBytes:
+    Type: Number
+    Default: 53687091200
+    MinValue: 0
+    Description: Trip photo bytes stored across all users, counting 15 MiB per in-flight upload (default 50 GiB).
 
 Conditions:
   HasTripwireAlertEmail: !Not [!Equals [!Ref TripwireAlertEmail, ""]]
@@ -125,7 +140,7 @@ Resources:
       # requests above it are throttled, not billed.
       OnDemandThroughput:
         MaxReadRequestUnits: 100
-        MaxWriteRequestUnits: 25
+        MaxWriteRequestUnits: 50
 
   # Legacy per-user photo table, used only by the /photos routes. Remove
   # (with internal/legacy) once no client calls /photos.
@@ -266,12 +281,19 @@ Resources:
           TABLE_NAME: !Ref AppTable
           LEGACY_TABLE_NAME: !Ref PhotosByUserTable
           BUCKET_NAME: !Ref PhotosBucket
+          QUOTA_DAILY_UPLOADS: !Ref UploadsPerUserPerDay
+          QUOTA_USER_BYTES: !Ref StoragePerUserBytes
+          QUOTA_TOTAL_BYTES: !Ref StorageTotalBytes
       Policies:
         - Version: "2012-10-17"
           Statement:
             - Effect: Allow
               Action: [dynamodb:GetItem, dynamodb:PutItem, dynamodb:Query, dynamodb:DeleteItem]
               Resource: [!GetAtt AppTable.Arn, !GetAtt PhotosByUserTable.Arn]
+            - Effect: Allow
+              # Upload quota counters (reserve on create, release on delete).
+              Action: dynamodb:UpdateItem
+              Resource: !GetAtt AppTable.Arn
             - Effect: Allow
               # PutObject backs the presigned POST, GetObject the presigned GET.
               Action: [s3:PutObject, s3:GetObject, s3:DeleteObject]
@@ -356,8 +378,9 @@ Resources:
           Statement:
             - Effect: Allow
               # MarkReady reads the pending record, then (in one transaction)
-              # updates it and puts its listing copy.
-              Action: [dynamodb:GetItem, dynamodb:UpdateItem, dynamodb:PutItem]
+              # updates it, puts its listing copy, deletes its upload
+              # reservation and updates the usage counters.
+              Action: [dynamodb:GetItem, dynamodb:UpdateItem, dynamodb:PutItem, dynamodb:DeleteItem]
               Resource: !GetAtt AppTable.Arn
             - Effect: Allow
               Action: dynamodb:UpdateItem

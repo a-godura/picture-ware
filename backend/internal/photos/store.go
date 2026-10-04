@@ -5,7 +5,6 @@ import (
 	"encoding/base64"
 	"errors"
 	"fmt"
-	"strconv"
 	"strings"
 
 	"github.com/aws/aws-sdk-go-v2/aws"
@@ -26,6 +25,7 @@ var ErrNotFound = errors.New("not found")
 //	PK=TRIP#<tripId>  SK=READY#<order>#<photoId>
 //	                                       listing copy of a ready photo
 //	PK=USER#<userId>  SK=TRIP#<tripId>     "my trips" entry (copy of the trip)
+//	PK=USAGE#...                           quota counters (see quota.go)
 //
 // Listing a trip's photos queries only the READY# range, so pending records
 // are never read (or paid for) by a list, and the range is already in
@@ -188,21 +188,6 @@ func (s *DynamoStore) IsMember(ctx context.Context, tripID, userID string) (bool
 	return out.Item != nil, nil
 }
 
-// PutPhoto creates a new photo record. It fails if the id already exists.
-func (s *DynamoStore) PutPhoto(ctx context.Context, p Photo) error {
-	it, err := item(tripPK(p.TripID), photoSK(p.ID), "photo", p)
-	if err != nil {
-		return err
-	}
-	_, err = s.Client.PutItem(ctx, &dynamodb.PutItemInput{
-		TableName: &s.Table, Item: it, ConditionExpression: aws.String(attributeAbsent),
-	})
-	if err != nil {
-		return fmt.Errorf("put photo: %w", err)
-	}
-	return nil
-}
-
 // GetPhoto returns one photo, or ErrNotFound.
 func (s *DynamoStore) GetPhoto(ctx context.Context, tripID, id string) (Photo, error) {
 	var p Photo
@@ -242,91 +227,6 @@ func (s *DynamoStore) ListReadyPhotos(ctx context.Context, tripID string, limit 
 		next = EncodeCursor(sk.Value)
 	}
 	return out, next, nil
-}
-
-// errChanged means a photo changed between being read and being written; the
-// caller should re-read and retry.
-var errChanged = errors.New("photo changed concurrently")
-
-// DeletePhoto removes a photo record and, for a ready photo, its listing
-// copy. p is the record as returned by GetPhoto. It returns ErrNotFound if a
-// ready photo no longer exists, and an error (retryable) if a pending photo
-// became ready or disappeared since it was read.
-func (s *DynamoStore) DeletePhoto(ctx context.Context, p Photo) error {
-	pk := tripPK(p.TripID)
-	if p.Status == StatusReady {
-		_, err := s.Client.TransactWriteItems(ctx, &dynamodb.TransactWriteItemsInput{
-			TransactItems: []types.TransactWriteItem{
-				{Delete: &types.Delete{TableName: &s.Table, Key: key(pk, photoSK(p.ID)), ConditionExpression: aws.String(attributeExists)}},
-				{Delete: &types.Delete{TableName: &s.Table, Key: key(pk, readySK(p))}},
-			},
-		})
-		if isConditionFailed(err) {
-			return ErrNotFound
-		}
-		if err != nil {
-			return fmt.Errorf("delete photo: %w", err)
-		}
-		return nil
-	}
-	_, err := s.Client.DeleteItem(ctx, &dynamodb.DeleteItemInput{
-		TableName: &s.Table, Key: key(pk, photoSK(p.ID)),
-		ConditionExpression:       aws.String("#s = :pending"),
-		ExpressionAttributeNames:  map[string]string{"#s": "status"},
-		ExpressionAttributeValues: map[string]types.AttributeValue{":pending": &types.AttributeValueMemberS{Value: StatusPending}},
-	})
-	if isConditionFailed(err) {
-		return fmt.Errorf("delete pending photo: %w", errChanged)
-	}
-	if err != nil {
-		return fmt.Errorf("delete photo: %w", err)
-	}
-	return nil
-}
-
-// MarkReady flips a pending photo to "ready", records the object size and
-// adds its listing copy, atomically. It returns ErrNotFound if no record
-// exists for (tripID, id), and nil if the photo is already ready (S3 can
-// deliver an event more than once).
-func (s *DynamoStore) MarkReady(ctx context.Context, tripID, id string, size int64) error {
-	var p Photo
-	if err := s.get(ctx, tripPK(tripID), photoSK(id), &p); err != nil {
-		return err
-	}
-	if p.Status == StatusReady {
-		return nil
-	}
-	p.Status, p.Size = StatusReady, size
-	listing, err := item(tripPK(tripID), readySK(p), "readyPhoto", p)
-	if err != nil {
-		return err
-	}
-	_, err = s.Client.TransactWriteItems(ctx, &dynamodb.TransactWriteItemsInput{
-		TransactItems: []types.TransactWriteItem{
-			{Update: &types.Update{
-				TableName:                &s.Table,
-				Key:                      key(tripPK(tripID), photoSK(id)),
-				UpdateExpression:         aws.String("SET #s = :ready, #sz = :size"),
-				ConditionExpression:      aws.String("#s = :pending"),
-				ExpressionAttributeNames: map[string]string{"#s": "status", "#sz": "size"},
-				ExpressionAttributeValues: map[string]types.AttributeValue{
-					":ready":   &types.AttributeValueMemberS{Value: StatusReady},
-					":pending": &types.AttributeValueMemberS{Value: StatusPending},
-					":size":    &types.AttributeValueMemberN{Value: strconv.FormatInt(size, 10)},
-				},
-			}},
-			{Put: &types.Put{TableName: &s.Table, Item: listing}},
-		},
-	})
-	if isConditionFailed(err) {
-		// Deleted or marked ready since we read it: the processor's retry
-		// re-reads the record and settles it.
-		return fmt.Errorf("mark ready: %w", errChanged)
-	}
-	if err != nil {
-		return fmt.Errorf("mark ready: %w", err)
-	}
-	return nil
 }
 
 func (s *DynamoStore) get(ctx context.Context, pk, sk string, out any) error {

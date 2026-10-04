@@ -53,6 +53,12 @@ type Photo struct {
 	Status      string     `dynamodbav:"status"`
 	Size        int64      `dynamodbav:"size,omitempty"`
 	CreatedAt   time.Time  `dynamodbav:"createdAt"`
+	// Reserved is the storage reserved for the upload when the record was
+	// created (0 for records from before quotas).
+	Reserved int64 `dynamodbav:"reserved,omitempty"`
+	// Counted is set when the photo's size was added to the usage counters,
+	// so deleting it subtracts the size exactly once.
+	Counted bool `dynamodbav:"counted,omitempty"`
 }
 
 // ObjectKey returns the S3 key for a trip's photo: trips/<tripID>/<id>.
