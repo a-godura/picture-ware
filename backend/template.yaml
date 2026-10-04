@@ -27,6 +27,22 @@ Parameters:
     Default: picture-ware-agodura
     AllowedPattern: "^[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?$"
     Description: Cognito hosted UI domain prefix (https://<prefix>.auth.<region>.amazoncognito.com).
+  DownloadTripwireBytes:
+    Type: Number
+    Default: 5368709120
+    MinValue: 1
+    Description: >
+      S3 bytes downloaded from the photo bucket in any rolling 60 minutes
+      (evaluated every minute) above which the tripwire blocks all photo
+      downloads until scripts/tripwire-reset.sh is run. Default 5 GiB.
+  TripwireAlertEmail:
+    Type: String
+    Default: ""
+    AllowedPattern: "^$|^[^@\\s]+@[^@\\s]+$"
+    Description: Optional email address subscribed to the tripwire topic (AWS sends a confirmation email first). Empty = no subscription.
+
+Conditions:
+  HasTripwireAlertEmail: !Not [!Equals [!Ref TripwireAlertEmail, ""]]
 
 Globals:
   Function:
@@ -61,6 +77,11 @@ Resources:
             Status: Enabled
             AbortIncompleteMultipartUpload:
               DaysAfterInitiation: 1
+      # Request metrics (1-minute, near-real-time) for the whole bucket; the
+      # download tripwire alarms on BytesDownloaded. Billed as CloudWatch
+      # custom metrics (16 metrics, prorated by the hours they are emitted).
+      MetricsConfigurations:
+        - Id: EntireBucket
 
   PhotosBucketPolicy:
     Type: AWS::S3::BucketPolicy
@@ -451,6 +472,100 @@ Resources:
       LogGroupName: !Sub /aws/lambda/${KillSwitchFunction}
       RetentionInDays: 14
 
+  # ---------- Download tripwire ----------
+  # Presigned GET URLs are served by S3 without the API throttle, and the
+  # budget kill switch lags billing data by 8-24 h. This alarm watches the
+  # bucket's request metrics and, within minutes, has TripwireFunction deny
+  # s3:GetObject on photos/* and trips/* until scripts/tripwire-reset.sh runs.
+  TripwireTopic:
+    Type: AWS::SNS::Topic
+    Properties:
+      DisplayName: picture-ware download tripwire
+
+  TripwireTopicPolicy:
+    Type: AWS::SNS::TopicPolicy
+    Properties:
+      Topics: [!Ref TripwireTopic]
+      PolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Sid: AllowCloudWatchAlarmPublish
+            Effect: Allow
+            Principal:
+              Service: cloudwatch.amazonaws.com
+            Action: sns:Publish
+            Resource: !Ref TripwireTopic
+            Condition:
+              StringEquals:
+                aws:SourceAccount: !Ref AWS::AccountId
+              ArnLike:
+                aws:SourceArn: !Sub arn:${AWS::Partition}:cloudwatch:${AWS::Region}:${AWS::AccountId}:alarm:*
+
+  TripwireEmailSubscription:
+    Type: AWS::SNS::Subscription
+    Condition: HasTripwireAlertEmail
+    Properties:
+      TopicArn: !Ref TripwireTopic
+      Protocol: email
+      Endpoint: !Ref TripwireAlertEmail
+
+  DownloadTripwireAlarm:
+    Type: AWS::CloudWatch::Alarm
+    DependsOn: TripwireTopicPolicy
+    Properties:
+      AlarmName: !Sub ${AWS::StackName}-download-tripwire
+      AlarmDescription: >
+        S3 download volume from the photo bucket exceeded DownloadTripwireBytes
+        in a rolling hour; TripwireFunction has denied s3:GetObject on photos/*
+        and trips/*. Investigate, then run backend/scripts/tripwire-reset.sh.
+      Namespace: AWS/S3
+      MetricName: BytesDownloaded
+      Dimensions:
+        - Name: BucketName
+          Value: !Ref PhotosBucket
+        - Name: FilterId
+          Value: EntireBucket
+      Statistic: Sum
+      # 1-hour sliding window, re-evaluated every minute.
+      Period: 3600
+      EvaluationPeriods: 1
+      Threshold: !Ref DownloadTripwireBytes
+      ComparisonOperator: GreaterThanThreshold
+      # S3 only emits request metrics while there is traffic.
+      TreatMissingData: notBreaching
+      AlarmActions: [!Ref TripwireTopic]
+
+  TripwireFunction:
+    Type: AWS::Serverless::Function
+    Metadata:
+      BuildMethod: go1.x
+    Properties:
+      CodeUri: cmd/tripwire/
+      Description: picture-ware download tripwire - denies s3:GetObject on photo prefixes via the bucket policy
+      Timeout: 30
+      Environment:
+        Variables:
+          BUCKET_NAME: !Ref PhotosBucket
+          BUCKET_ARN: !GetAtt PhotosBucket.Arn
+          PROTECTED_PREFIXES: photos/,trips/
+      Policies:
+        - Version: "2012-10-17"
+          Statement:
+            - Effect: Allow
+              Action: [s3:GetBucketPolicy, s3:PutBucketPolicy]
+              Resource: !GetAtt PhotosBucket.Arn
+      Events:
+        DownloadAlarm:
+          Type: SNS
+          Properties:
+            Topic: !Ref TripwireTopic
+
+  TripwireFunctionLogGroup:
+    Type: AWS::Logs::LogGroup
+    Properties:
+      LogGroupName: !Sub /aws/lambda/${TripwireFunction}
+      RetentionInDays: 14
+
 Outputs:
   ApiUrl:
     Description: Base URL of the HTTP API
@@ -488,3 +603,9 @@ Outputs:
   KillSwitchTopicArn:
     Description: SNS topic the budget notifies
     Value: !Ref KillSwitchTopic
+  DownloadTripwireAlarmName:
+    Description: CloudWatch alarm that trips the download block (used by tripwire-reset.sh)
+    Value: !Ref DownloadTripwireAlarm
+  TripwireTopicArn:
+    Description: SNS topic the download tripwire alarm notifies (subscribe for alerts)
+    Value: !Ref TripwireTopic
