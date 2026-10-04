@@ -3,20 +3,22 @@ import SwiftUI
 
 /// Signed-in main screen: every uploaded photo as a pin on a full-screen map.
 struct PhotoMapView: View {
-    let auth: AuthService
+    let signOut: () async -> Void
     @State private var model: PhotosModel
-    private let uploads = UploadCenter.shared
-    private let api: APIClient
+    private let uploads: UploadCenter
+    private let api: any BackendAPI
     @State private var position: MapCameraPosition = .automatic
     @State private var experience = MapExperience()
     @State private var export: ExportModel
     @State private var showingExport = false
     @Environment(\.scenePhase) private var scenePhase
 
-    init(auth: AuthService) {
-        self.auth = auth
-        let api = APIClient(baseURL: auth.config.apiURL, tokens: auth)
+    /// `api` is shared by the photo list, the upload queue and export; `signOut` ends the session
+    /// (the upload queue is cleared first).
+    init(api: any BackendAPI, uploads: UploadCenter = .shared, signOut: @escaping () async -> Void) {
         self.api = api
+        self.uploads = uploads
+        self.signOut = signOut
         _model = State(initialValue: PhotosModel(api: api))
         _export = State(initialValue: ExportModel(fetchPhotos: { try await api.listPhotos() }))
     }
@@ -71,7 +73,7 @@ struct PhotoMapView: View {
             Button("Sign Out", systemImage: "rectangle.portrait.and.arrow.right", role: .destructive) {
                 Task {
                     await uploads.signOut()
-                    await auth.signOut()
+                    await signOut()
                 }
             }
         } label: {

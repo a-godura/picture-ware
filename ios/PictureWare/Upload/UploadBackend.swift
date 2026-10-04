@@ -29,9 +29,9 @@ protocol UploadTransport: Sendable {
     func cancel(itemID: String) async
 }
 
-/// `UploadBackend` over the real API client.
+/// `UploadBackend` over the app's API (the real `APIClient`, or `MockAPI` in mock mode).
 struct APIUploadBackend: UploadBackend {
-    let api: APIClient
+    let api: any PhotosAPI
 
     func createPhoto(_ request: CreatePhotoRequest) async throws -> CreatePhotoResponse {
         try await api.createPhoto(request)

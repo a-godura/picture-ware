@@ -63,10 +63,62 @@ struct APIClient: Sendable {
         guard (200..<300).contains(http.statusCode) else { throw APIError.uploadFailed(status: http.statusCode) }
     }
 
+    // MARK: - Trips
+
+    func listTrips() async throws -> [Trip] {
+        let data = try await send(request(path: "trips", method: "GET"))
+        return try APICoding.decoder().decode(TripList.self, from: data).trips
+    }
+
+    func createTrip(_ body: CreateTripRequest) async throws -> Trip {
+        var request = request(path: "trips", method: "POST")
+        request.setValue("application/json", forHTTPHeaderField: "Content-Type")
+        request.httpBody = try APICoding.encoder().encode(body)
+        let data = try await send(request, expecting: 201)
+        return try APICoding.decoder().decode(Trip.self, from: data)
+    }
+
+    func getTrip(id: String) async throws -> Trip {
+        let data = try await send(request(path: "trips/\(id)", method: "GET"))
+        return try APICoding.decoder().decode(Trip.self, from: data)
+    }
+
+    func listTripPhotos(tripID: String, cursor: String?, limit: Int?) async throws -> TripPhotoPage {
+        var query: [URLQueryItem] = []
+        if let limit { query.append(URLQueryItem(name: "limit", value: String(limit))) }
+        if let cursor { query.append(URLQueryItem(name: "cursor", value: cursor)) }
+        let data = try await send(request(path: "trips/\(tripID)/photos", method: "GET", query: query))
+        return try APICoding.decoder().decode(TripPhotoPage.self, from: data)
+    }
+
+    func createTripPhoto(tripID: String, _ body: CreatePhotoRequest) async throws -> CreatePhotoResponse {
+        var request = request(path: "trips/\(tripID)/photos", method: "POST")
+        request.setValue("application/json", forHTTPHeaderField: "Content-Type")
+        request.httpBody = try APICoding.encoder().encode(body)
+        let data = try await send(request, expecting: 201)
+        return try APICoding.decoder().decode(CreatePhotoResponse.self, from: data)
+    }
+
+    /// Deletes a photo the caller uploaded to a trip. "photo not found" means it's already gone,
+    /// which is what the caller wanted; "trip not found" (or any other 404) is an error.
+    func deleteTripPhoto(tripID: String, photoID: String) async throws {
+        do {
+            _ = try await send(request(path: "trips/\(tripID)/photos/\(photoID)", method: "DELETE"), expecting: 204)
+        } catch APIError.http(status: 404, message: "photo not found") {
+        }
+    }
+
     // MARK: - Private
 
-    private func request(path: String, method: String) -> URLRequest {
-        var request = URLRequest(url: baseURL.appending(path: path))
+    private func request(path: String, method: String, query: [URLQueryItem] = []) -> URLRequest {
+        var url = baseURL.appending(path: path)
+        if !query.isEmpty, var components = URLComponents(url: url, resolvingAgainstBaseURL: false) {
+            components.queryItems = query
+            // URLComponents leaves "+" alone, but servers commonly read it as a space (cursors may hold one).
+            components.percentEncodedQuery = components.percentEncodedQuery?.replacingOccurrences(of: "+", with: "%2B")
+            url = components.url ?? url
+        }
+        var request = URLRequest(url: url)
         request.httpMethod = method
         request.setValue("application/json", forHTTPHeaderField: "Accept")
         return request
@@ -89,12 +141,15 @@ struct APIClient: Sendable {
             }
         }
         guard status == expected else {
-            // Lambda errors are {"error": ...}; API Gateway's own are {"message": ...}.
-            let body = try? JSONDecoder().decode([String: String].self, from: data)
-            let message = body?["error"] ?? body?["message"]
-            throw APIError.http(status: status, message: message)
+            throw APIError.http(status: status, message: Self.errorMessage(from: data))
         }
         return data
+    }
+
+    /// Lambda errors are `{"error": ...}`; API Gateway's own are `{"message": ...}`.
+    static func errorMessage(from data: Data) -> String? {
+        let body = try? JSONDecoder().decode([String: String].self, from: data)
+        return body?["error"] ?? body?["message"]
     }
 
     private func perform(_ request: URLRequest, token: String) async throws -> (Data, Int) {
