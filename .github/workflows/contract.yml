@@ -2,7 +2,9 @@ name: contract
 
 # Fails a PR whose api/openapi.yaml would break clients built against main's
 # contract (removed routes/fields, new required inputs, ...). Additive changes
-# pass. A deliberate breaking change (e.g. removing a route no client uses any
+# pass. Operations marked `x-planned: true` on main were never deployed, so
+# they are dropped from main's copy before comparing: they may change freely
+# until their backend PR deploys them and removes the marker. A deliberate breaking change (e.g. removing a route no client uses any
 # more) needs the `breaking-change-approved` label on the PR.
 
 on:
@@ -52,6 +54,11 @@ jobs:
         if: steps.base.outputs.exists == 'true'
         run: go install "github.com/oasdiff/oasdiff@$OASDIFF_VERSION"
 
+      - name: Drop planned (never deployed) operations from main's contract
+        if: steps.base.outputs.exists == 'true'
+        working-directory: backend
+        run: go run ./tools/dropplanned < "$RUNNER_TEMP/base.yaml" > "$RUNNER_TEMP/base-deployed.yaml"
+
       - name: Check for breaking changes
         if: steps.base.outputs.exists == 'true'
         env:
@@ -60,10 +67,10 @@ jobs:
           {
             echo "### API contract changes"
             echo '```'
-            oasdiff changelog "$RUNNER_TEMP/base.yaml" api/openapi.yaml || true
+            oasdiff changelog "$RUNNER_TEMP/base-deployed.yaml" api/openapi.yaml || true
             echo '```'
           } >> "$GITHUB_STEP_SUMMARY"
-          if oasdiff breaking "$RUNNER_TEMP/base.yaml" api/openapi.yaml --fail-on ERR; then
+          if oasdiff breaking "$RUNNER_TEMP/base-deployed.yaml" api/openapi.yaml --fail-on ERR; then
             echo "No breaking changes."
           elif [ "$APPROVED" = "true" ]; then
             echo "::warning::Breaking contract change allowed by the breaking-change-approved label."
