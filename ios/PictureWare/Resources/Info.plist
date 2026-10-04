@@ -31,6 +31,8 @@
 	</array>
 	<key>CFBundleVersion</key>
 	<string>$(CURRENT_PROJECT_VERSION)</string>
+	<key>NSPhotoLibraryAddUsageDescription</key>
+	<string>Picture Ware saves your trip's original photos, with their date and location, to your library when you ask it to.</string>
 	<key>NSPhotoLibraryUsageDescription</key>
 	<string>Picture Ware reads a photo's location from your library when the photo file itself doesn't include it, so it can be placed on the map.</string>
 	<key>PWApiUrl</key>

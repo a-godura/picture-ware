@@ -5,6 +5,7 @@ struct PhotoDetailView: View {
     let photo: Photo
     let onDelete: () async throws -> Void
     @Environment(\.dismiss) private var dismiss
+    @Environment(\.exportModel) private var export
     @State private var confirmingDelete = false
     @State private var isDeleting = false
     @State private var deleteError: String?
@@ -23,6 +24,8 @@ struct PhotoDetailView: View {
                         }
                     }
                     .clipShape(RoundedRectangle(cornerRadius: 12))
+
+                    if let export { SaveToPhotosButton(model: export, photo: photo) }
 
                     LabeledContent("Taken") {
                         Text(photo.takenAt?.formatted(date: .long, time: .shortened) ?? "Unknown")
