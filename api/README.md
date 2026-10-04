@@ -12,15 +12,19 @@ other running:
   `x-planned: true` (`go test ./internal/...` from `backend/`).
 - **CI** (`contract / breaking-changes`): a PR fails if it changes the contract
   in a way that breaks clients built against `main` (removed routes or fields,
-  new required inputs, ...). Additive changes pass. A deliberate breaking
-  change needs the `breaking-change-approved` label.
+  new required inputs, ...). Additive changes pass. Operations marked
+  `x-planned: true` on `main` are left out of that comparison
+  (`backend/tools/dropplanned`): nothing deployed or shipped uses them, so
+  reshaping them isn't breaking. A deliberate breaking change to anything
+  deployed needs the `breaking-change-approved` label.
 
 ## Changing the API
 
 1. Change `openapi.yaml` first (additively), with examples. Mark new
    operations `x-planned: true`: they're agreed but not deployed yet, so the
    route check doesn't expect them in `template.yaml`, and the app can build
-   against them in mock mode.
+   against them in mock mode. Planned operations can still be changed or
+   removed without the breaking-change label.
 2. Implement it in the backend; its tests must match the contract. The same
    PR removes `x-planned` from the operations it deploys.
 3. Build the app against the contract. Backend and app can ship in separate
@@ -28,5 +32,11 @@ other running:
 4. Remove something only once no client uses it, in its own PR with the
    `breaking-change-approved` label.
 
-Check locally: `oasdiff breaking <(git show main:api/openapi.yaml) api/openapi.yaml`
+Check locally, from the repo root, exactly as CI does:
+
+```sh
+git show origin/main:api/openapi.yaml | (cd backend && go run ./tools/dropplanned) > /tmp/base.yaml
+oasdiff breaking /tmp/base.yaml api/openapi.yaml
+```
+
 (install: `go install github.com/oasdiff/oasdiff@latest`).

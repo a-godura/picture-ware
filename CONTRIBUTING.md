@@ -7,7 +7,9 @@ These rules apply to everyone working on this repo, human or agent.
 1. **Contract first.** Any API change starts in [`api/openapi.yaml`](api/openapi.yaml),
    additively, with examples. See [`api/README.md`](api/README.md). New
    operations land marked `x-planned: true` (agreed, not deployed yet); the
-   backend PR that deploys them removes the marker.
+   backend PR that deploys them removes the marker. Until then they may still
+   change freely: the breaking-change check ignores planned operations on
+   `main`.
 2. **Backend and app ship separately.** A PR touches `backend/` *or* `ios/`
    (plus `api/` when needed), never both. Each side must be fully testable
    without the other: backend tests use fakes and the contract tests; app tests
@@ -31,7 +33,7 @@ These rules apply to everyone working on this repo, human or agent.
 - Backend: `cd backend && make test && sam validate --lint && sam build`
 - App: `cd ios && xcodegen generate` (if files were added) then
   `xcodebuild test -project PictureWare.xcodeproj -scheme PictureWare -destination 'platform=iOS Simulator,id=<your own simulator>'`
-- Contract: `oasdiff breaking <(git show origin/main:api/openapi.yaml) api/openapi.yaml`
+- Contract: `oasdiff breaking <(git show origin/main:api/openapi.yaml | (cd backend && go run ./tools/dropplanned)) api/openapi.yaml`
 - No secrets, tokens, passwords or AWS account IDs in the repo (it's public).
 
 ## Commits and PRs
